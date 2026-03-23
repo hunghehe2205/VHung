@@ -1,4 +1,3 @@
-import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -58,22 +57,16 @@ class Transformer(nn.Module):
 
 class VadInternVL(nn.Module):
     def __init__(self,
-                 embed_dim: int,
                  visual_length: int,
                  visual_width: int,
                  visual_head: int,
                  visual_layers: int,
                  attn_window: int,
-                 prompt_prefix: int,
-                 prompt_postfix: int,
                  device):
         super().__init__()
         self.visual_length = visual_length
         self.visual_width = visual_width
-        self.embed_dim = embed_dim
         self.attn_window = attn_window
-        self.prompt_prefix = prompt_prefix
-        self.prompt_postfix = prompt_postfix
         self.device = device
 
         self.temporal = Transformer(
@@ -92,11 +85,6 @@ class VadInternVL(nn.Module):
         self.linear = nn.Linear(visual_width, visual_width)
         self.gelu = QuickGELU()
 
-        self.mlp1 = nn.Sequential(OrderedDict([
-            ("c_fc", nn.Linear(visual_width, visual_width * 4)),
-            ("gelu", QuickGELU()),
-            ("c_proj", nn.Linear(visual_width * 4, visual_width))
-        ]))
         self.mlp2 = nn.Sequential(OrderedDict([
             ("c_fc", nn.Linear(visual_width, visual_width * 4)),
             ("gelu", QuickGELU()),
@@ -104,17 +92,11 @@ class VadInternVL(nn.Module):
         ]))
         self.classifier = nn.Linear(visual_width, 1)
 
-        self.clipmodel, _ = clip.load("ViT-B/16", device)
-        for clip_param in self.clipmodel.parameters():
-            clip_param.requires_grad = False
-
         self.frame_position_embeddings = nn.Embedding(visual_length, visual_width)
-        self.text_prompt_embeddings = nn.Embedding(77, self.embed_dim)
 
         self.initialize_parameters()
 
     def initialize_parameters(self):
-        nn.init.normal_(self.text_prompt_embeddings.weight, std=0.01)
         nn.init.normal_(self.frame_position_embeddings.weight, std=0.01)
 
     def build_attention_mask(self, attn_window):
@@ -177,3 +159,8 @@ class VadInternVL(nn.Module):
         x = self.linear(x)
 
         return x
+
+    def forward(self, visual, lengths):
+        visual_features = self.encode_video(visual, None, lengths)
+        logits = self.classifier(visual_features + self.mlp2(visual_features))
+        return logits

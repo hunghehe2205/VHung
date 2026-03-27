@@ -93,20 +93,26 @@ def main():
     parser.add_argument('--mode', type=str, choices=['train', 'test'], required=True)
     args = parser.parse_args()
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    assert torch.cuda.is_available(), "CUDA not available! This script requires GPU."
+    device = "cuda"
+    print(f"[GPU] {torch.cuda.get_device_name(0)} | Memory: {torch.cuda.get_device_properties(0).total_mem / 1024**3:.1f} GB")
 
-    print("Loading InternVL model...")
+    print("[1/3] Loading InternVL model (ppxin321/HolmesVAU-2B)...")
     model = AutoModel.from_pretrained(
         "ppxin321/HolmesVAU-2B",
         trust_remote_code=True,
         torch_dtype=torch.bfloat16,
     ).to(device).eval()
+    print(f"[1/3] Model loaded. GPU memory used: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
 
     transform = build_transform(input_size=448)
+
+    print("[2/3] Scanning video list...")
     crops = TRAIN_CROPS if args.mode == 'train' else TEST_CROPS
     videos = get_video_list(args.mode)
+    print(f"[2/3] Found {len(videos)} videos | Mode: {args.mode} | Crops per video: {len(crops)}")
 
-    print(f"Mode: {args.mode} | Videos: {len(videos)} | Crops per video: {len(crops)}")
+    print("[3/3] Extracting features...")
 
     pbar = tqdm(videos, desc=f"Extracting [{args.mode}]")
     for video_path, label in pbar:

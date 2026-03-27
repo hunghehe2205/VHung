@@ -23,8 +23,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from crop_intern import video_crop, build_transform
 
 VIDEO_DIR = '/home/emogenai4e/emo/Hung_data/UCF_Crime'
-OUTPUT_DIR = '/home/emogenai4e/emo/Hung_data/internvl_feature'
-BATCH_SIZE = 16
+TRAIN_OUTPUT_DIR = '/home/emogenai4e/emo/Hung_data/ucf_internvl_train_feature'
+TEST_OUTPUT_DIR  = '/home/emogenai4e/emo/Hung_data/ucf_internvl_test_feature'
+BATCH_SIZE = 32
 TRAIN_CROPS = list(range(10))  # 0-9
 TEST_CROPS = [5]               # center crop only
 NUM_FRAMES = 16
@@ -116,6 +117,8 @@ def main():
 
     print("[2/3] Scanning video list...")
     crops = TRAIN_CROPS if args.mode == 'train' else TEST_CROPS
+    output_dir = TRAIN_OUTPUT_DIR if args.mode == 'train' else TEST_OUTPUT_DIR
+
     videos = get_video_list(args.mode)
     print(f"[2/3] Found {len(videos)} videos | Mode: {args.mode} | Crops per video: {len(crops)}")
 
@@ -124,7 +127,7 @@ def main():
     pbar = tqdm(videos, desc=f"Extracting [{args.mode}]")
     for video_path, label in pbar:
         video_name = os.path.splitext(os.path.basename(video_path))[0]
-        out_subdir = os.path.join(OUTPUT_DIR, label)
+        out_subdir = os.path.join(output_dir, label)
         os.makedirs(out_subdir, exist_ok=True)
 
         # Check if all crops already exist

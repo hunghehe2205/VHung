@@ -24,19 +24,26 @@ from crop_intern import video_crop, build_transform
 
 VIDEO_DIR = '/home/emogenai4e/emo/Hung_data/UCF_Crime'
 OUTPUT_DIR = '/home/emogenai4e/emo/Hung_data/internvl_feature'
-BATCH_SIZE = 8
+BATCH_SIZE = 16
 TRAIN_CROPS = list(range(10))  # 0-9
 TEST_CROPS = [5]               # center crop only
+NUM_FRAMES = 16
 
 
-def load_all_frames(video_path):
+def load_video_frames(video_path, num_frames=NUM_FRAMES):
+    """Uniform sampling num_frames từ video, trả về numpy [T, H, W, 3] BGR."""
     cap = cv2.VideoCapture(video_path)
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if total <= 0:
+        cap.release()
+        return None
+    indices = np.linspace(0, total - 1, num_frames, dtype=int)
     frames = []
-    while True:
+    for idx in indices:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
         ret, frame = cap.read()
-        if not ret:
-            break
-        frames.append(frame)
+        if ret:
+            frames.append(frame)
     cap.release()
     if len(frames) == 0:
         return None
@@ -129,7 +136,7 @@ def main():
             pbar.set_postfix(video=video_name, status="SKIP")
             continue
 
-        frames = load_all_frames(video_path)
+        frames = load_video_frames(video_path)
         if frames is None:
             pbar.set_postfix(video=video_name, status="FAIL")
             continue

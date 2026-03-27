@@ -95,7 +95,7 @@ def main():
 
     assert torch.cuda.is_available(), "CUDA not available! This script requires GPU."
     device = "cuda"
-    print(f"[GPU] {torch.cuda.get_device_name(0)} | Memory: {torch.cuda.get_device_properties(0).total_mem / 1024**3:.1f} GB")
+    print(f"[GPU] {torch.cuda.get_device_name(0)} | Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
 
     print("[1/3] Loading InternVL model (ppxin321/HolmesVAU-2B)...")
     model = AutoModel.from_pretrained(

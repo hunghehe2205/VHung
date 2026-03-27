@@ -24,6 +24,8 @@ from crop_intern import video_crop, build_transform
 
 VIDEO_DIR = '/home/emogenai4e/emo/Hung_data/UCF_Crime'
 OUTPUT_DIR = '/home/emogenai4e/emo/Hung_data/internvl_feature'
+TRAIN_TXT = 'data/Anomaly_Train.txt'
+TEST_TXT = 'data/Anomaly_Test.txt'
 BATCH_SIZE = 16
 TRAIN_CROPS = list(range(10))  # 0-9
 TEST_CROPS = [5]               # center crop only
@@ -69,29 +71,15 @@ def extract_video_features(model, transform, frames, crop_id, device):
 
 
 def get_video_list(mode):
-    """Collect all video paths grouped by label."""
+    """Load video list from Anomaly_Train.txt or Anomaly_Test.txt."""
+    txt_path = TRAIN_TXT if mode == 'train' else TEST_TXT
+    files = [line.strip() for line in open(txt_path) if line.strip()]
     videos = []
-    for label in sorted(os.listdir(VIDEO_DIR)):
-        label_dir = os.path.join(VIDEO_DIR, label)
-        if not os.path.isdir(label_dir):
-            continue
-
-        is_normal = 'Normal' in label
-        # Train: anomaly folders + Training_Normal_Videos_Anomaly
-        # Test: Testing_Normal_Videos_Anomaly + anomaly test videos
-        if mode == 'train':
-            if label == 'Testing_Normal_Videos_Anomaly':
-                continue
-        else:
-            if label == 'Training_Normal_Videos_Anomaly':
-                continue
-
-        out_label = 'Normal' if is_normal else label
-
-        for f in sorted(os.listdir(label_dir)):
-            if f.endswith(('.avi', '.mp4')):
-                videos.append((os.path.join(label_dir, f), out_label))
-
+    for entry in files:
+        label = entry.split('/')[0]
+        video_path = os.path.join(VIDEO_DIR, entry)
+        out_label = 'Normal' if 'Normal' in label else label
+        videos.append((video_path, out_label))
     return videos
 
 

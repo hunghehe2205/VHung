@@ -17,6 +17,7 @@ import numpy as np
 import torch
 from PIL import Image
 from transformers import AutoModel
+from tqdm import tqdm
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from crop_intern import video_crop, build_transform
@@ -107,7 +108,8 @@ def main():
 
     print(f"Mode: {args.mode} | Videos: {len(videos)} | Crops per video: {len(crops)}")
 
-    for idx, (video_path, label) in enumerate(videos):
+    pbar = tqdm(videos, desc=f"Extracting [{args.mode}]")
+    for video_path, label in pbar:
         video_name = os.path.splitext(os.path.basename(video_path))[0]
         out_subdir = os.path.join(OUTPUT_DIR, label)
         os.makedirs(out_subdir, exist_ok=True)
@@ -118,12 +120,12 @@ def main():
             for c in crops
         )
         if all_exist:
-            print(f"[{idx + 1}/{len(videos)}] SKIP {video_name} (already done)")
+            pbar.set_postfix(video=video_name, status="SKIP")
             continue
 
         frames = load_all_frames(video_path)
         if frames is None:
-            print(f"[{idx + 1}/{len(videos)}] FAIL {video_path} (cannot read)")
+            pbar.set_postfix(video=video_name, status="FAIL")
             continue
 
         for crop_id in crops:
@@ -133,7 +135,7 @@ def main():
             feat = extract_video_features(model, transform, frames, crop_id, device)
             np.save(out_path, feat)
 
-        print(f"[{idx + 1}/{len(videos)}] {video_name} | {label} | frames={frames.shape[0]}")
+        pbar.set_postfix(video=video_name, label=label, frames=frames.shape[0])
 
     print("Done.")
 

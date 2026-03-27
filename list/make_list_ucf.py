@@ -1,7 +1,7 @@
 import os
 import csv
 
-root_path = '/path/to/UCFInternFeatures/'  # TODO: đổi thành path chứa InternVL features
+root_path = '/home/emogenai4e/emo/Hung_data/internvl_feature/'
 train_txt = 'data/Anomaly_Train.txt'
 test_txt = 'data/Anomaly_Test.txt'
 

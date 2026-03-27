@@ -1,8 +1,62 @@
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
-from VadCLIP.src.utils.layers import GraphConvolution, DistanceAdj
+from torch.nn.parameter import Parameter
 from collections import OrderedDict
+from scipy.spatial.distance import pdist, squareform
+
+
+class GraphConvolution(nn.Module):
+
+    def __init__(self, in_features, out_features, bias=False, residual=True):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = Parameter(torch.FloatTensor(in_features, out_features))
+        if bias:
+            self.bias = Parameter(torch.FloatTensor(out_features))
+        else:
+            self.register_parameter('bias', None)
+        nn.init.xavier_uniform_(self.weight)
+        if self.bias is not None:
+            self.bias.data.fill_(0.1)
+        if not residual:
+            self.residual = lambda x: 0
+        elif in_features == out_features:
+            self.residual = lambda x: x
+        else:
+            self.residual = nn.Conv1d(in_channels=in_features, out_channels=out_features, kernel_size=5, padding=2)
+
+    def forward(self, input, adj):
+        support = input.matmul(self.weight)
+        output = adj.matmul(support)
+        if self.bias is not None:
+            output = output + self.bias
+        if self.in_features != self.out_features and self.residual:
+            input = input.permute(0, 2, 1)
+            res = self.residual(input)
+            res = res.permute(0, 2, 1)
+            output = output + res
+        else:
+            output = output + self.residual(input)
+        return output
+
+
+class DistanceAdj(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+        self.sigma = Parameter(torch.FloatTensor(1))
+        self.sigma.data.fill_(0.1)
+
+    def forward(self, batch_size, max_seqlen):
+        arith = np.arange(max_seqlen).reshape(-1, 1)
+        dist = pdist(arith, metric='cityblock').astype(np.float32)
+        dist = torch.from_numpy(squareform(dist)).cuda()
+        dist = torch.exp(-dist / torch.exp(torch.tensor(1.)))
+        dist = dist.unsqueeze(0).repeat(batch_size, 1, 1)
+        return dist
 
 class LayerNorm(nn.LayerNorm):
 

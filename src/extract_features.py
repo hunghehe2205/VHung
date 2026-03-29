@@ -23,13 +23,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from crop_intern import video_crop, build_transform
 
 VIDEO_DIR = '/home/emogenai4e/emo/Hung_data/UCF_Crime'
-TRAIN_TXT = 'data/Anomaly_Train.txt'
-TEST_TXT = 'data/Anomaly_Test.txt'
+TRAIN_TXT = '/home/emogenai4e/emo/Hung_data/Anomaly_Train.txt'
+TEST_TXT = '/home/emogenai4e/emo/Hung_data/Anomaly_Test.txt'
 TRAIN_OUTPUT_DIR = '/home/emogenai4e/emo/Hung_data/ucf_internvl_train_feature'
 TEST_OUTPUT_DIR  = '/home/emogenai4e/emo/Hung_data/ucf_internvl_test_feature'
 BATCH_SIZE = 32
 TRAIN_CROPS = list(range(10))  # 0-9
-TEST_CROPS = [5]               # center crop only
+TEST_CROPS = [0]               # center crop only
 NUM_FRAMES = 16
 
 

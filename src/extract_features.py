@@ -40,7 +40,7 @@ def load_video_frames(video_path, num_frames=NUM_FRAMES):
     if total <= 0:
         cap.release()
         return None
-    indices = np.linspace(0, total - 1, num_frames, dtype=int)
+    indices = np.arange(0, total, num_frames)
     frames = []
     for idx in indices:
         cap.set(cv2.CAP_PROP_POS_FRAMES, idx)

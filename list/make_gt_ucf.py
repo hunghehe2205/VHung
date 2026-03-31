@@ -4,7 +4,7 @@ import pandas as pd
 clip_len = 16
 
 feature_list = 'list/ucf_intern_rgbtest.csv'
-gt_txt = 'data/Temporal_Anomaly_Annotation.txt'
+gt_txt = 'data/Temporal_Anomaly_Annotation_for_Testing_Videos.txt'
 gt_lines = list(open(gt_txt))
 gt = []
 lists = pd.read_csv(feature_list)

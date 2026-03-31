@@ -29,7 +29,7 @@ TRAIN_OUTPUT_DIR = '/home/emogenai4e/emo/Hung_data/ucf_internvl_train_feature'
 TEST_OUTPUT_DIR  = '/home/emogenai4e/emo/Hung_data/ucf_internvl_test_feature'
 BATCH_SIZE = 32
 TRAIN_CROPS = list(range(10))  # 0-9
-TEST_CROPS = [0]               # center crop only
+TEST_CROPS = [5]               # center crop only
 NUM_FRAMES = 16
 
 

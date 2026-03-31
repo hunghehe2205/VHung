@@ -1,7 +1,8 @@
 import os
 import csv
 
-root_path = '/home/emogenai4e/emo/Hung_data/internvl_feature/'
+train_root = 'data_feat/ucf_internvl_train_feature/'
+test_root = 'data_feat/ucf_internvl_test_feature/'
 train_txt = 'data/Anomaly_Train.txt'
 test_txt = 'data/Anomaly_Test.txt'
 
@@ -15,8 +16,11 @@ def make_train_list():
         writer = csv.writer(f)
         writer.writerow(['path', 'label'])
         for file in files:
-            filename = root_path + file[:-5] + '__0.npy'
+            name = file[:-5]  # remove .mp4\n
             label = file.split('/')[0]
+            if 'Normal' in label:
+                name = 'Normal/' + name.split('/')[1]
+            filename = train_root + name + '__0.npy'
             if os.path.exists(filename):
                 if 'Normal' in label:
                     filename = filename[:-5]
@@ -47,7 +51,9 @@ def make_test_list():
             file = file.strip()
             label = file.split('/')[0]
             name = file[:-4]  # remove .avi/.mp4
-            filename = root_path + name + '__5.npy'  # center crop only
+            if 'Normal' in label:
+                name = 'Normal/' + name.split('/')[1]
+            filename = test_root + name + '__5.npy'
             if os.path.exists(filename):
                 writer.writerow([filename, label])
             else:

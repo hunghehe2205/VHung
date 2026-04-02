@@ -27,7 +27,7 @@ TRAIN_TXT = '/home/emogenai4e/emo/Hung_data/Anomaly_Train.txt'
 TEST_TXT = '/home/emogenai4e/emo/Hung_data/Anomaly_Test.txt'
 TRAIN_OUTPUT_DIR = '/home/emogenai4e/emo/Hung_data/ucf_internvl_train_feature'
 TEST_OUTPUT_DIR  = '/home/emogenai4e/emo/Hung_data/ucf_internvl_test_feature'
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 TRAIN_CROPS = list(range(10))  # 0-9
 TEST_CROPS = [5]               # center crop only
 NUM_FRAMES = 16
@@ -87,6 +87,7 @@ def get_video_list(mode):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', type=str, choices=['train', 'test'], required=True)
+    parser.add_argument('--order', type=str, choices=['forward', 'reverse'], default='forward')
     args = parser.parse_args()
 
     assert torch.cuda.is_available(), "CUDA not available! This script requires GPU."
@@ -108,6 +109,8 @@ def main():
     output_dir = TRAIN_OUTPUT_DIR if args.mode == 'train' else TEST_OUTPUT_DIR
 
     videos = get_video_list(args.mode)
+    if args.order == 'reverse':
+        videos = list(reversed(videos))
     print(f"[2/3] Found {len(videos)} videos | Mode: {args.mode} | Crops per video: {len(crops)}")
 
     print("[3/3] Extracting features...")

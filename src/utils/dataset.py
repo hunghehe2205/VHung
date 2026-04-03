@@ -31,6 +31,7 @@ class UCFDataset(data.Dataset):
             feature, feat_length = process_split(feature, self.feat_dim)
 
         feature = torch.tensor(feature)
+        feature = feature / (feature.norm(dim=-1, keepdim=True) + 1e-6)
         label = self.df.loc[index]['label']
         return feature, label, feat_length
 

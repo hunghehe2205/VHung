@@ -3,7 +3,7 @@ import argparse
 parser = argparse.ArgumentParser(description='InternVAD-UCF')
 parser.add_argument('--seed', default=234, type=int)
 
-parser.add_argument('--visual-length', default=256, type=int)
+parser.add_argument('--visual-length', default=512, type=int)
 parser.add_argument('--visual-width', default=1024, type=int)
 parser.add_argument('--visual-head', default=8, type=int)
 parser.add_argument('--visual-layers', default=2, type=int)

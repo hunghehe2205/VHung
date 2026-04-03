@@ -11,7 +11,6 @@ import torch
 from torch.utils.data import DataLoader
 
 from src.utils.dataset import UCFDataset
-from src.utils.tools import get_batch_mask
 from src.ucf_train import CLAS2, get_binary_label
 from intern_vad import VadInternVL
 import src.ucf_option as ucf_option
@@ -173,20 +172,6 @@ try:
     print(f"  Grad norm range: [{min(grad_norms):.6f}, {max(grad_norms):.4f}]")
 except Exception as e:
     check("Loss computation", False, str(e))
-
-# ============================================================
-# Step 7: Padding mask
-# ============================================================
-print("\n=== Step 7: Padding Mask ===")
-mask = get_batch_mask(n_len[:small_bs], args.visual_length)
-check(f"Mask shape: {mask.shape} == [{small_bs}, {args.visual_length}]",
-      mask.shape == (small_bs, args.visual_length))
-for idx in range(small_bs):
-    l = int(n_len[idx])
-    valid_region = mask[idx, :l].sum().item()
-    padded_region = mask[idx, l:].sum().item() if l < args.visual_length else 0
-    check(f"  Sample {idx}: length={l}, valid=0 masked={padded_region}",
-          valid_region == 0 and (l >= args.visual_length or padded_region == args.visual_length - l))
 
 # ============================================================
 # Summary

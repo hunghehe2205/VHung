@@ -5,7 +5,6 @@ from torch import nn
 from torch.nn.parameter import Parameter
 from collections import OrderedDict
 from scipy.spatial.distance import pdist, squareform
-from src.utils.tools import get_batch_mask
 
 
 class GraphConvolution(nn.Module):
@@ -199,12 +198,8 @@ class VadInternVL(nn.Module):
         frame_position_embeddings = frame_position_embeddings.permute(1, 0, 2)
         images = images.permute(1, 0, 2) + frame_position_embeddings
 
-        padding_mask = get_batch_mask(lengths, self.visual_length).to(images.device)
-        x, _ = self.temporal((images, padding_mask))
+        x, _ = self.temporal((images, None))
         x = x.permute(1, 0, 2)
-
-        # Replace NaN from attention on fully-masked windows with 0
-        x = torch.nan_to_num(x, nan=0.0)
 
         adj = self.adj4(x, lengths)
         disadj = self.disAdj(x.shape[0], x.shape[1], x.device)
@@ -216,10 +211,6 @@ class VadInternVL(nn.Module):
 
         x = torch.cat((x1, x2), 2)
         x = self.linear(x)
-
-        # Zero out padding positions
-        valid_mask = (~padding_mask).unsqueeze(-1).float()  # [B, T, 1]
-        x = x * valid_mask
 
         return x
 

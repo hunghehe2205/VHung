@@ -21,6 +21,7 @@ def test(model, testdataloader, maxlen, gt, device):
         for i, item in enumerate(testdataloader):
             visual = item[0].squeeze(0)
             length = item[2]
+            # item[3] = frame_gt (unused in test)
 
             length = int(length)
             len_cur = length

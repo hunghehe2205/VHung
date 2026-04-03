@@ -33,6 +33,59 @@ def CLAS2(logits, labels, lengths, device):
     return clsloss
 
 
+def focal_loss(logits, frame_gt, lengths, gamma=2.0, alpha=0.25):
+    """Focal BCE loss for frame-level supervision with noisy MLLM annotations.
+
+    Args:
+        logits: (B, T, 1) raw logits from model
+        frame_gt: (B, T) snippet-level targets. -1 = no annotation (skip)
+        lengths: (B,) valid snippet counts
+        gamma: focal focusing parameter
+        alpha: weight for positive class
+    """
+    logits = logits.squeeze(-1)  # (B, T)
+    B, T = logits.shape
+
+    # Build valid mask: has annotation (not -1) AND within valid length
+    valid_mask = frame_gt >= 0  # (B, T)
+    for i in range(B):
+        seq_len = max(int(lengths[i]), 1)
+        valid_mask[i, seq_len:] = False
+
+    if not valid_mask.any():
+        return torch.tensor(0.0, device=logits.device)
+
+    pred = torch.sigmoid(logits[valid_mask])
+    target = frame_gt[valid_mask]
+
+    # Focal loss: -alpha_t * (1 - p_t)^gamma * log(p_t)
+    bce = F.binary_cross_entropy(pred, target, reduction='none')
+    p_t = pred * target + (1 - pred) * (1 - target)
+    alpha_t = alpha * target + (1 - alpha) * (1 - target)
+    focal_weight = alpha_t * (1 - p_t) ** gamma
+
+    return (focal_weight * bce).mean()
+
+
+def smoothness_loss(logits, lengths):
+    """Temporal smoothness: penalize large score differences between adjacent snippets."""
+    logits = logits.squeeze(-1)  # (B, T)
+    B, T = logits.shape
+    scores = torch.sigmoid(logits)
+
+    total = 0.0
+    count = 0
+    for i in range(B):
+        seq_len = max(int(lengths[i]), 2)
+        diff = (scores[i, 1:seq_len] - scores[i, :seq_len-1]).abs()
+        total = total + diff.sum()
+        count += seq_len - 1
+
+    if count == 0:
+        return torch.tensor(0.0, device=logits.device)
+    return total / count
+
+
 def get_binary_label(text_labels):
     """Convert text labels to binary: [1,0] for Normal, [0,1] for Anomaly."""
     label_vectors = torch.zeros(len(text_labels), 2)
@@ -74,17 +127,22 @@ def train(model, normal_loader, anomaly_loader, testloader, args, device):
 
         pbar = tqdm(range(num_batches), desc=f"Epoch {e+1}/{args.max_epoch}", ncols=120)
         for i in pbar:
-            normal_features, normal_label, normal_lengths = next(normal_iter)
-            anomaly_features, anomaly_label, anomaly_lengths = next(anomaly_iter)
+            normal_features, normal_label, normal_lengths, normal_gt = next(normal_iter)
+            anomaly_features, anomaly_label, anomaly_lengths, anomaly_gt = next(anomaly_iter)
 
             visual_features = torch.cat([normal_features, anomaly_features], dim=0).to(device)
             text_labels = list(normal_label) + list(anomaly_label)
             feat_lengths = torch.cat([normal_lengths, anomaly_lengths], dim=0).to(device)
             binary_labels = get_binary_label(text_labels).to(device)
+            frame_gts = torch.cat([normal_gt, anomaly_gt], dim=0).to(device)
 
             logits = model(visual_features, feat_lengths)
 
-            loss = CLAS2(logits, binary_labels, feat_lengths, device)
+            loss_mil = CLAS2(logits, binary_labels, feat_lengths, device)
+            loss_fl = focal_loss(logits, frame_gts, feat_lengths, args.focal_gamma, args.focal_alpha)
+            loss_sm = smoothness_loss(logits, feat_lengths)
+
+            loss = loss_mil + args.lambda_focal * loss_fl + args.mu_smooth * loss_sm
             loss_total += loss.item()
             avg_loss = loss_total / (i + 1)
 
@@ -93,7 +151,13 @@ def train(model, normal_loader, anomaly_loader, testloader, args, device):
             optimizer.step()
 
             global_step += 1
-            wandb.log({"train/loss": loss.item(), "train/lr": optimizer.param_groups[0]['lr']}, step=global_step)
+            wandb.log({
+                "train/loss": loss.item(),
+                "train/loss_mil": loss_mil.item(),
+                "train/loss_focal": loss_fl.item(),
+                "train/loss_smooth": loss_sm.item(),
+                "train/lr": optimizer.param_groups[0]['lr'],
+            }, step=global_step)
 
             pbar.set_postfix(loss=f"{avg_loss:.4f}", lr=f"{optimizer.param_groups[0]['lr']:.1e}", best_auc=f"{auc_best:.4f}")
 
@@ -139,9 +203,11 @@ if __name__ == '__main__':
     args = ucf_option.parser.parse_args()
     setup_seed(args.seed)
 
-    normal_dataset = UCFDataset(args.visual_length, args.train_list, False, normal=True)
+    normal_dataset = UCFDataset(args.visual_length, args.train_list, False, normal=True,
+                                hivau_path=args.hivau_path, normal_target=args.normal_target)
     normal_loader = DataLoader(normal_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
-    anomaly_dataset = UCFDataset(args.visual_length, args.train_list, False, normal=False)
+    anomaly_dataset = UCFDataset(args.visual_length, args.train_list, False, normal=False,
+                                 hivau_path=args.hivau_path, normal_target=args.normal_target)
     anomaly_loader = DataLoader(anomaly_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
 
     test_dataset = UCFDataset(args.visual_length, args.test_list, True)
@@ -163,6 +229,11 @@ if __name__ == '__main__':
         "max_epoch": args.max_epoch,
         "scheduler_milestones": args.scheduler_milestones,
         "scheduler_rate": args.scheduler_rate,
+        "lambda_focal": args.lambda_focal,
+        "mu_smooth": args.mu_smooth,
+        "focal_gamma": args.focal_gamma,
+        "focal_alpha": args.focal_alpha,
+        "normal_target": args.normal_target,
     })
     wandb.watch(model, log="gradients", log_freq=100)
 

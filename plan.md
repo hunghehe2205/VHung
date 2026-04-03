@@ -161,9 +161,90 @@ from VadCLIP.src.utils.tools import (
 5. **Tạo `src/ucf_train.py`** — training loop + CLAS2 loss
 6. **Tạo `src/extract_features.py`** — batch extract InternVL features cho UCF
 
+---
+
+## Phase 8: Frame-level Supervision với HIVAU Noisy Annotation
+
+### Context
+- HIVAU-70k-NEW chứa temporal annotation từ MLLM cho UCF-Crime
+- 810/810 anomaly training videos có annotation (100% coverage)
+- 735 Normal videos cũng có trong file (label=[], events nên bỏ qua)
+- Annotation dạng `events: [[start_sec, end_sec], ...]` — **noisy** vì từ MLLM
+- Mục tiêu: cải thiện temporal localization (hiện tại MIL chỉ push toàn bộ video lên cao)
+
+### Loss Design: 3 thành phần
+
+#### L_total = CLAS2 + λ * L_focal + μ * L_smooth
+
+| Component | Mục đích | Target | Weight |
+|---|---|---|---|
+| **CLAS2** (giữ nguyên) | Video-level MIL classification | topk pooling → BCE | 1.0 |
+| **L_focal** (mới) | Frame-level supervision | Snippet-level GT từ HIVAU | λ = 0.5 |
+| **L_smooth** (mới) | Temporal coherence | \|score[t] - score[t+1]\| | μ = 0.1 |
+
+#### L_focal — Focal Binary Cross-Entropy
+
+```
+FL(p, y) = -α_t * (1 - p_t)^γ * log(p_t)
+```
+
+- **γ = 2.0**: focus vào hard examples, tự giảm weight cho easy/noisy samples
+- **Anomaly videos**: GT từ HIVAU events → binary 256-dim (1 = anomaly snippet, 0 = normal snippet)
+- **Normal videos**: soft low target = 0.1 (không ép hard zero, cho phép distribution thấp)
+- Focal loss tự handle noise: MLLM sai boundary → model uncertain → (1-p)^γ nhỏ → contribution thấp
+
+#### L_smooth — Temporal Smoothness
+
+```
+L_smooth = (1/T) * Σ |score[t] - score[t+1]|
+```
+
+- Chỉ tính trên valid snippets (không tính padding)
+- Giảm oscillation, buộc model predict smooth transitions
+
+### Snippet-to-Time Mapping
+
+```
+Sau uniform_extract về 256 snippets:
+  snippet_i → time = (i / actual_length) * (n_frames / fps)
+  Với actual_length = min(raw_snippets, 256)
+  
+Nếu video ngắn (pad): chỉ tính loss trên actual_length snippets
+```
+
+### Dataset Changes
+
+**`UCFDataset.__getitem__` trả thêm `frame_gt`:**
+- Load HIVAU JSON → lấy events cho video hiện tại
+- Map events (seconds) → snippet indices → binary vector 256-dim
+- Anomaly video: 1 tại anomaly snippets, 0 tại normal snippets  
+- Normal video: 0.1 cho tất cả snippets (soft low target)
+- Video không có trong HIVAU: trả None → skip frame-level loss
+
+### Hyperparameters mới trong ucf_option.py
+
+```python
+--lambda-focal    0.5     # weight cho focal loss
+--mu-smooth       0.1     # weight cho smoothness loss  
+--focal-gamma     2.0     # focal loss gamma
+--focal-alpha     0.25    # focal loss alpha (weight cho positive class)
+--normal-target   0.1     # soft target cho normal videos
+--hivau-path      'HIVAU-70k-NEW/ucf_database_train.json'
+```
+
+### Implementation Notes
+
+1. **Noise handling**: Focal loss γ=2 tự down-weight noisy samples. Không cần thêm label smoothing.
+2. **Normal videos**: Dùng soft target 0.1 thay vì 0.0 — cho phép model output distribution thấp mà không bị penalty quá mạnh
+3. **Backward compatible**: Nếu λ=0, μ=0 → fallback về CLAS2-only (baseline)
+4. **Chỉ anomaly videos dùng HIVAU events**: Normal videos events từ MLLM là hallucinate → dùng soft target thay thế
+
+---
+
 ## Verification
 
 1. Extract features 1 video test → check shape `[T, 1024]`
 2. `python src/ucf_train.py` → model init OK, loss backward OK
 3. AUC/AP output mỗi 1280 steps
 4. So sánh AUC với VadCLIP branch 1 baseline
+5. So sánh AUC + temporal localization giữa CLAS2-only vs CLAS2+Focal+Smooth

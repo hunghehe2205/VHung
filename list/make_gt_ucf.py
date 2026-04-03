@@ -12,12 +12,12 @@ count = 0
 
 for idx in range(lists.shape[0]):
     name = lists.loc[idx]['path']
-    if '__0.npy' not in name:
+    if '__5.npy' not in name:
         continue
     fea = np.load(name)
     lens = (fea.shape[0] + 1) * clip_len
     name = name.split('/')[-1]
-    name = name[:-7]
+    name = name.split('__')[0]
 
     gt_vec = np.zeros(lens).astype(np.float32)
     if 'Normal' not in name:

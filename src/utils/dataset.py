@@ -10,20 +10,22 @@ from torch.utils.data import DataLoader
 from src.utils.tools import process_feat, process_split
 
 
-def build_frame_gt(events, n_frames, fps, feat_length, target_length, normal_target=0.1, is_normal=False):
-    """Build snippet-level GT from HIVAU temporal events.
+def build_frame_gt(events, n_frames, fps, feat_length, target_length,
+                   normal_target=0.1, is_normal=False, sigma=3.0):
+    """Build snippet-level GT from HIVAU temporal events with Gaussian boundary smoothing.
+
+    Events are in seconds. Mapping: seconds -> snippet index via duration and actual_len.
+    Instead of hard 0->1 at boundaries, applies Gaussian ramp to handle noisy MLLM annotations.
 
     Args:
-        events: list of [start_sec, end_sec] from HIVAU
+        events: list of [start_sec, end_sec] from HIVAU (in seconds)
         n_frames: total frames in video
         fps: video fps
-        feat_length: actual number of valid snippets (before padding)
+        feat_length: actual number of snippets in raw feature (before pad/extract)
         target_length: target dimension (256)
         normal_target: soft target for normal videos
         is_normal: whether this is a normal video
-
-    Returns:
-        frame_gt: tensor of shape (target_length,) with values in [0, 1]
+        sigma: Gaussian std in snippet units for boundary smoothing
     """
     frame_gt = torch.full((target_length,), normal_target if is_normal else 0.0)
 
@@ -32,26 +34,38 @@ def build_frame_gt(events, n_frames, fps, feat_length, target_length, normal_tar
 
     duration = n_frames / fps
     actual_len = min(feat_length, target_length)
+    indices = torch.arange(target_length, dtype=torch.float32)
 
     for start_sec, end_sec in events:
-        # Map seconds to snippet indices
-        start_idx = int((start_sec / duration) * actual_len)
-        end_idx = int((end_sec / duration) * actual_len) + 1
-        start_idx = max(0, min(start_idx, actual_len))
-        end_idx = max(0, min(end_idx, actual_len))
-        frame_gt[start_idx:end_idx] = 1.0
+        # Seconds -> snippet index (float for smooth mapping)
+        start_idx = (start_sec / duration) * actual_len
+        end_idx = (end_sec / duration) * actual_len
+
+        # Gaussian ramp up at start, ramp down at end
+        ramp_up = torch.sigmoid((indices - start_idx) / sigma)
+        ramp_down = torch.sigmoid((end_idx - indices) / sigma)
+        event_gt = ramp_up * ramp_down  # smooth bell-like shape over the event
+
+        # Max with existing (handles overlapping events)
+        frame_gt = torch.max(frame_gt, event_gt)
+
+    # Zero out padding region
+    if actual_len < target_length:
+        frame_gt[actual_len:] = 0.0
 
     return frame_gt
 
 
 class UCFDataset(data.Dataset):
     def __init__(self, feat_dim: int, file_path: str, test_mode: bool,
-                 normal: bool = False, hivau_path: str = None, normal_target: float = 0.1):
+                 normal: bool = False, hivau_path: str = None,
+                 normal_target: float = 0.1, sigma: float = 3.0):
         self.df = pd.read_csv(file_path)
         self.feat_dim = feat_dim
         self.test_mode = test_mode
         self.normal = normal
         self.normal_target = normal_target
+        self.sigma = sigma
 
         # Load HIVAU annotation
         self.hivau = None
@@ -99,7 +113,8 @@ class UCFDataset(data.Dataset):
                     feat_length=raw_length,
                     target_length=self.feat_dim,
                     normal_target=self.normal_target,
-                    is_normal=is_normal
+                    is_normal=is_normal,
+                    sigma=self.sigma
                 )
             elif is_normal:
                 # Normal video not in HIVAU -> soft low target

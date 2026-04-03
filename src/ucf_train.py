@@ -33,21 +33,18 @@ def CLAS2(logits, labels, lengths, device):
     return clsloss
 
 
-def focal_loss(logits, frame_gt, lengths, gamma=2.0, alpha=0.25):
-    """Focal BCE loss for frame-level supervision with noisy MLLM annotations.
+def frame_bce_loss(logits, frame_gt, lengths):
+    """BCE loss with Gaussian-smoothed targets for frame-level supervision.
 
     Args:
         logits: (B, T, 1) raw logits from model
-        frame_gt: (B, T) snippet-level targets. -1 = no annotation (skip)
+        frame_gt: (B, T) Gaussian-smoothed targets. -1 = no annotation (skip)
         lengths: (B,) valid snippet counts
-        gamma: focal focusing parameter
-        alpha: weight for positive class
     """
     logits = logits.squeeze(-1)  # (B, T)
     B, T = logits.shape
 
-    # Build valid mask: has annotation (not -1) AND within valid length
-    valid_mask = frame_gt >= 0  # (B, T)
+    valid_mask = frame_gt >= 0
     for i in range(B):
         seq_len = max(int(lengths[i]), 1)
         valid_mask[i, seq_len:] = False
@@ -58,13 +55,7 @@ def focal_loss(logits, frame_gt, lengths, gamma=2.0, alpha=0.25):
     pred = torch.sigmoid(logits[valid_mask])
     target = frame_gt[valid_mask]
 
-    # Focal loss: -alpha_t * (1 - p_t)^gamma * log(p_t)
-    bce = F.binary_cross_entropy(pred, target, reduction='none')
-    p_t = pred * target + (1 - pred) * (1 - target)
-    alpha_t = alpha * target + (1 - alpha) * (1 - target)
-    focal_weight = alpha_t * (1 - p_t) ** gamma
-
-    return (focal_weight * bce).mean()
+    return F.binary_cross_entropy(pred, target)
 
 
 def smoothness_loss(logits, lengths):
@@ -139,10 +130,10 @@ def train(model, normal_loader, anomaly_loader, testloader, args, device):
             logits = model(visual_features, feat_lengths)
 
             loss_mil = CLAS2(logits, binary_labels, feat_lengths, device)
-            loss_fl = focal_loss(logits, frame_gts, feat_lengths, args.focal_gamma, args.focal_alpha)
+            loss_bce = frame_bce_loss(logits, frame_gts, feat_lengths)
             loss_sm = smoothness_loss(logits, feat_lengths)
 
-            loss = loss_mil + args.lambda_focal * loss_fl + args.mu_smooth * loss_sm
+            loss = loss_mil + args.lambda_frame * loss_bce + args.mu_smooth * loss_sm
             loss_total += loss.item()
             avg_loss = loss_total / (i + 1)
 
@@ -154,7 +145,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, device):
             wandb.log({
                 "train/loss": loss.item(),
                 "train/loss_mil": loss_mil.item(),
-                "train/loss_focal": loss_fl.item(),
+                "train/loss_bce": loss_bce.item(),
                 "train/loss_smooth": loss_sm.item(),
                 "train/lr": optimizer.param_groups[0]['lr'],
             }, step=global_step)
@@ -204,10 +195,12 @@ if __name__ == '__main__':
     setup_seed(args.seed)
 
     normal_dataset = UCFDataset(args.visual_length, args.train_list, False, normal=True,
-                                hivau_path=args.hivau_path, normal_target=args.normal_target)
+                                hivau_path=args.hivau_path, normal_target=args.normal_target,
+                                sigma=args.gauss_sigma)
     normal_loader = DataLoader(normal_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
     anomaly_dataset = UCFDataset(args.visual_length, args.train_list, False, normal=False,
-                                 hivau_path=args.hivau_path, normal_target=args.normal_target)
+                                 hivau_path=args.hivau_path, normal_target=args.normal_target,
+                                 sigma=args.gauss_sigma)
     anomaly_loader = DataLoader(anomaly_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
 
     test_dataset = UCFDataset(args.visual_length, args.test_list, True)
@@ -229,11 +222,10 @@ if __name__ == '__main__':
         "max_epoch": args.max_epoch,
         "scheduler_milestones": args.scheduler_milestones,
         "scheduler_rate": args.scheduler_rate,
-        "lambda_focal": args.lambda_focal,
+        "lambda_frame": args.lambda_frame,
         "mu_smooth": args.mu_smooth,
-        "focal_gamma": args.focal_gamma,
-        "focal_alpha": args.focal_alpha,
         "normal_target": args.normal_target,
+        "gauss_sigma": args.gauss_sigma,
     })
     wandb.watch(model, log="gradients", log_freq=100)
 

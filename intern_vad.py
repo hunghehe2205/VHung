@@ -146,12 +146,19 @@ class VadInternVL(nn.Module):
         ]))
         self.classifier = nn.Linear(visual_width, 1)
 
+        self.input_norm = LayerNorm(visual_width)
         self.frame_position_embeddings = nn.Embedding(visual_length, visual_width)
 
         self.initialize_parameters()
 
     def initialize_parameters(self):
         nn.init.normal_(self.frame_position_embeddings.weight, std=0.01)
+        nn.init.normal_(self.classifier.weight, std=0.001)
+        nn.init.zeros_(self.classifier.bias)
+        for m in self.mlp2:
+            if isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, std=0.001)
+                nn.init.zeros_(m.bias)
 
     def build_attention_mask(self, attn_window):
         # lazily create causal attention mask, with full attention between the vision tokens
@@ -192,6 +199,7 @@ class VadInternVL(nn.Module):
 
     def encode_video(self, images, padding_mask, lengths):
         images = images.to(torch.float)
+        images = self.input_norm(images)
         position_ids = torch.arange(self.visual_length, device=self.device)
         position_ids = position_ids.unsqueeze(0).expand(images.shape[0], -1)
         frame_position_embeddings = self.frame_position_embeddings(position_ids)

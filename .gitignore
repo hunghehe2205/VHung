@@ -1,5 +1,5 @@
-# Model weights
-model/*.pth
+# # Model weights
+# model/*.pth
 
 # Python
 __pycache__/
@@ -16,6 +16,11 @@ venv/
 # IDE
 .vscode/
 .idea/
+
+# Wandb
+wandb/
+
+output_infer/
 
 # OS
 .DS_Store

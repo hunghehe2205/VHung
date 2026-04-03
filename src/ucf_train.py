@@ -9,6 +9,7 @@ from torch.optim.lr_scheduler import MultiStepLR
 import numpy as np
 import random
 import wandb
+from tqdm import tqdm
 
 from intern_vad import VadInternVL
 from src.ucf_test import test
@@ -63,13 +64,16 @@ def train(model, normal_loader, anomaly_loader, testloader, args, device):
         print("epoch:", epoch + 1, " auc:", auc_best)
 
     global_step = 0
+    num_batches = min(len(normal_loader), len(anomaly_loader))
+
     for e in range(args.max_epoch):
         model.train()
         loss_total = 0
         normal_iter = iter(normal_loader)
         anomaly_iter = iter(anomaly_loader)
 
-        for i in range(min(len(normal_loader), len(anomaly_loader))):
+        pbar = tqdm(range(num_batches), desc=f"Epoch {e+1}/{args.max_epoch}", ncols=120)
+        for i in pbar:
             normal_features, normal_label, normal_lengths = next(normal_iter)
             anomaly_features, anomaly_label, anomaly_lengths = next(anomaly_iter)
 
@@ -82,6 +86,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, device):
 
             loss = CLAS2(logits, binary_labels, feat_lengths, device)
             loss_total += loss.item()
+            avg_loss = loss_total / (i + 1)
 
             optimizer.zero_grad()
             loss.backward()
@@ -90,10 +95,11 @@ def train(model, normal_loader, anomaly_loader, testloader, args, device):
             global_step += 1
             wandb.log({"train/loss": loss.item(), "train/lr": optimizer.param_groups[0]['lr']}, step=global_step)
 
+            pbar.set_postfix(loss=f"{avg_loss:.4f}", lr=f"{optimizer.param_groups[0]['lr']:.1e}", best_auc=f"{auc_best:.4f}")
+
             step = i * normal_loader.batch_size * 2
             if step % 1280 == 0 and step != 0:
-                avg_loss = loss_total / (i + 1)
-                print('epoch: ', e + 1, '| step: ', step, '| loss: ', avg_loss)
+                pbar.clear()
                 AUC, AP = test(model, testloader, args.visual_length, gt, device)
                 wandb.log({"eval/AUC": AUC, "eval/AP": AP, "train/avg_loss": avg_loss}, step=global_step)
 
@@ -107,6 +113,8 @@ def train(model, normal_loader, anomaly_loader, testloader, args, device):
                     }
                     torch.save(checkpoint, args.checkpoint_path)
                     wandb.log({"eval/best_AUC": auc_best}, step=global_step)
+
+                model.train()
 
         scheduler.step()
 

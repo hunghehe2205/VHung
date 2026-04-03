@@ -203,6 +203,9 @@ class VadInternVL(nn.Module):
         x, _ = self.temporal((images, padding_mask))
         x = x.permute(1, 0, 2)
 
+        # Replace NaN from attention on fully-masked windows with 0
+        x = torch.nan_to_num(x, nan=0.0)
+
         adj = self.adj4(x, lengths)
         disadj = self.disAdj(x.shape[0], x.shape[1], x.device)
         x1_h = self.gelu(self.gc1(x, adj))
@@ -213,6 +216,10 @@ class VadInternVL(nn.Module):
 
         x = torch.cat((x1, x2), 2)
         x = self.linear(x)
+
+        # Zero out padding positions
+        valid_mask = (~padding_mask).unsqueeze(-1).float()  # [B, T, 1]
+        x = x * valid_mask
 
         return x
 

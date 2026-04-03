@@ -1,8 +1,8 @@
 import os
 import csv
 
-train_root = 'data_feat/ucf_internvl_train_feature/'
-test_root = 'data_feat/ucf_internvl_test_feature/'
+train_root = '/home/emogenai4e/emo/Hung_data/ucf_internvl_train_feature/'
+test_root = '/home/emogenai4e/emo/Hung_data/ucf_internvl_test_feature/'
 train_txt = 'data/Anomaly_Train.txt'
 test_txt = 'data/Anomaly_Test.txt'
 

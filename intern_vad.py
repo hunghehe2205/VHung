@@ -5,6 +5,7 @@ from torch import nn
 from torch.nn.parameter import Parameter
 from collections import OrderedDict
 from scipy.spatial.distance import pdist, squareform
+from src.utils.tools import get_batch_mask
 
 
 class GraphConvolution(nn.Module):
@@ -50,11 +51,11 @@ class DistanceAdj(nn.Module):
         self.sigma = Parameter(torch.FloatTensor(1))
         self.sigma.data.fill_(0.1)
 
-    def forward(self, batch_size, max_seqlen):
+    def forward(self, batch_size, max_seqlen, device):
         arith = np.arange(max_seqlen).reshape(-1, 1)
         dist = pdist(arith, metric='cityblock').astype(np.float32)
-        dist = torch.from_numpy(squareform(dist)).cuda()
-        dist = torch.exp(-dist / torch.exp(torch.tensor(1.)))
+        dist = torch.from_numpy(squareform(dist)).to(device)
+        dist = torch.exp(-dist / torch.exp(torch.tensor(1., device=device)))
         dist = dist.unsqueeze(0).repeat(batch_size, 1, 1)
         return dist
 
@@ -198,11 +199,12 @@ class VadInternVL(nn.Module):
         frame_position_embeddings = frame_position_embeddings.permute(1, 0, 2)
         images = images.permute(1, 0, 2) + frame_position_embeddings
 
-        x, _ = self.temporal((images, None))
+        padding_mask = get_batch_mask(lengths, self.visual_length).to(images.device)
+        x, _ = self.temporal((images, padding_mask))
         x = x.permute(1, 0, 2)
 
         adj = self.adj4(x, lengths)
-        disadj = self.disAdj(x.shape[0], x.shape[1])
+        disadj = self.disAdj(x.shape[0], x.shape[1], x.device)
         x1_h = self.gelu(self.gc1(x, adj))
         x2_h = self.gelu(self.gc3(x, disadj))
 

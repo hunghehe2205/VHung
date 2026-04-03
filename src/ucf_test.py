@@ -29,18 +29,15 @@ def test(model, testdataloader, maxlen, gt, device):
 
             visual = visual.to(device)
 
-            lengths = torch.zeros(int(length / maxlen) + 1)
-            for j in range(int(length / maxlen) + 1):
-                if j == 0 and length < maxlen:
-                    lengths[j] = length
-                elif j == 0 and length > maxlen:
+            num_splits = int(len_cur / maxlen) + 1
+            lengths = torch.zeros(num_splits)
+            remaining = len_cur
+            for j in range(num_splits):
+                if remaining >= maxlen:
                     lengths[j] = maxlen
-                    length -= maxlen
-                elif length > maxlen:
-                    lengths[j] = maxlen
-                    length -= maxlen
+                    remaining -= maxlen
                 else:
-                    lengths[j] = length
+                    lengths[j] = remaining
             lengths = lengths.to(int)
 
             logits = model(visual, lengths)

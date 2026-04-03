@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import MultiStepLR
 import numpy as np
 import random
+import wandb
 
 from intern_vad import VadInternVL
 from src.ucf_test import test
@@ -22,7 +23,8 @@ def CLAS2(logits, labels, lengths, device):
     logits = torch.sigmoid(logits).reshape(logits.shape[0], logits.shape[1])
 
     for i in range(logits.shape[0]):
-        tmp, _ = torch.topk(logits[i, 0:lengths[i]], k=int(lengths[i] / 16 + 1), largest=True)
+        seq_len = max(int(lengths[i]), 1)
+        tmp, _ = torch.topk(logits[i, 0:seq_len], k=int(seq_len / 16 + 1), largest=True)
         tmp = torch.mean(tmp).view(1)
         instance_logits = torch.cat([instance_logits, tmp], dim=0)
 
@@ -43,6 +45,7 @@ def get_binary_label(text_labels):
 
 def train(model, normal_loader, anomaly_loader, testloader, args, device):
     model.to(device)
+    os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
     gt = np.load(args.gt_path)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -59,6 +62,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, device):
         print("checkpoint info:")
         print("epoch:", epoch + 1, " auc:", auc_best)
 
+    global_step = 0
     for e in range(args.max_epoch):
         model.train()
         loss_total = 0
@@ -66,7 +70,6 @@ def train(model, normal_loader, anomaly_loader, testloader, args, device):
         anomaly_iter = iter(anomaly_loader)
 
         for i in range(min(len(normal_loader), len(anomaly_loader))):
-            step = 0
             normal_features, normal_label, normal_lengths = next(normal_iter)
             anomaly_features, anomaly_label, anomaly_lengths = next(anomaly_iter)
 
@@ -84,10 +87,15 @@ def train(model, normal_loader, anomaly_loader, testloader, args, device):
             loss.backward()
             optimizer.step()
 
-            step += i * normal_loader.batch_size * 2
+            global_step += 1
+            wandb.log({"train/loss": loss.item(), "train/lr": optimizer.param_groups[0]['lr']}, step=global_step)
+
+            step = i * normal_loader.batch_size * 2
             if step % 1280 == 0 and step != 0:
-                print('epoch: ', e + 1, '| step: ', step, '| loss: ', loss_total / (i + 1))
+                avg_loss = loss_total / (i + 1)
+                print('epoch: ', e + 1, '| step: ', step, '| loss: ', avg_loss)
                 AUC, AP = test(model, testloader, args.visual_length, gt, device)
+                wandb.log({"eval/AUC": AUC, "eval/AP": AP, "train/avg_loss": avg_loss}, step=global_step)
 
                 if AUC > auc_best:
                     auc_best = AUC
@@ -98,6 +106,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, device):
                         'auc': auc_best,
                     }
                     torch.save(checkpoint, args.checkpoint_path)
+                    wandb.log({"eval/best_AUC": auc_best}, step=global_step)
 
         scheduler.step()
 
@@ -107,6 +116,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, device):
 
     checkpoint = torch.load(args.checkpoint_path)
     torch.save(checkpoint['model_state_dict'], args.model_path)
+    wandb.finish()
 
 
 def setup_seed(seed):
@@ -133,5 +143,19 @@ if __name__ == '__main__':
         args.visual_length, args.visual_width, args.visual_head,
         args.visual_layers, args.attn_window, device
     )
+
+    wandb.init(project="VadInternVL", config={
+        "visual_length": args.visual_length,
+        "visual_width": args.visual_width,
+        "visual_head": args.visual_head,
+        "visual_layers": args.visual_layers,
+        "attn_window": args.attn_window,
+        "batch_size": args.batch_size,
+        "lr": args.lr,
+        "max_epoch": args.max_epoch,
+        "scheduler_milestones": args.scheduler_milestones,
+        "scheduler_rate": args.scheduler_rate,
+    })
+    wandb.watch(model, log="gradients", log_freq=100)
 
     train(model, normal_loader, anomaly_loader, test_loader, args, device)

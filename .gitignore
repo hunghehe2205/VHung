@@ -1,6 +1,9 @@
 # Model weights
 model/
 
+# Feature data
+UCFClipFeatures/
+
 # Python
 __pycache__/
 *.pyc

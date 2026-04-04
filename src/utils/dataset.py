@@ -87,13 +87,17 @@ class UCFDataset(data.Dataset):
         feature = torch.tensor(feature)
         label = self.df.loc[index]['label']
 
-        # Build frame-level GT from HIVAU
+        # Build frame-level GT from HIVAU (anomaly videos only)
         frame_gt = torch.full((self.feat_dim,), -1.0)  # -1 = no annotation
         if self.hivau is not None:
             video_name = self._get_video_name(self.df.loc[index]['path'])
             is_normal = (label == 'Normal')
 
-            if video_name in self.hivau:
+            if is_normal:
+                # Normal video: all frames target = 0
+                frame_gt = torch.zeros(self.feat_dim)
+            elif video_name in self.hivau and self.hivau[video_name].get('events'):
+                # Anomaly video with HIVAU events
                 info = self.hivau[video_name]
                 frame_gt = build_frame_gt(
                     events=info['events'],
@@ -101,13 +105,10 @@ class UCFDataset(data.Dataset):
                     fps=info['fps'],
                     feat_length=raw_length,
                     target_length=self.feat_dim,
-                    normal_target=self.normal_target,
-                    is_normal=is_normal,
+                    normal_target=0.0,
+                    is_normal=False,
                     sigma=self.sigma
                 )
-            elif is_normal:
-                # Normal video not in HIVAU -> soft low target
-                frame_gt = torch.full((self.feat_dim,), self.normal_target)
 
         return feature, label, feat_length, frame_gt
 

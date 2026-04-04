@@ -35,11 +35,8 @@ parser.add_argument('--gt-path',         default='list/gt_ucf.npy')
 
 # ── Loss weights ──
 # lambda_mem: memory supervision (từ UR-DMU A_loss/N_loss)
-parser.add_argument('--lambda-mem',     default=0.1,  type=float,
+parser.add_argument('--lambda-mem',     default=0.05, type=float,
                     help='Weight for memory supervision loss')
-# lambda_triplet: triplet loss (từ UR-DMU)
-parser.add_argument('--lambda-triplet', default=0.05, type=float,
-                    help='Weight for triplet loss')
 # mu_smooth: temporal smoothness
 parser.add_argument('--mu-smooth',      default=0.5,  type=float,
                     help='Weight for smoothness loss')
@@ -49,6 +46,5 @@ parser.add_argument('--mu-smooth',      default=0.5,  type=float,
 parser.add_argument('--hivau-path',     default='HIVAU-70k-NEW/ucf_database_train.json')
 parser.add_argument('--normal-target',  default=0.05, type=float)
 parser.add_argument('--gauss-sigma',    default=1.5,  type=float)
-# lambda_frame=0 → tắt focal loss hoàn toàn
-parser.add_argument('--lambda-frame',   default=0.0,  type=float,
-                    help='Weight for focal loss (0 = disabled, GT misalign issue)')
+parser.add_argument('--lambda-frame',   default=0.1,  type=float,
+                    help='Weight for frame-level BCE (GT alignment fixed)')

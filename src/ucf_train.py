@@ -128,6 +128,21 @@ def triplet_loss(x: torch.Tensor, A_att: torch.Tensor, N_att: torch.Tensor,
     return triplet_fn(anchor, positive, negative)
 
 
+def frame_bce_loss(logits: torch.Tensor, frame_gt: torch.Tensor,
+                   lengths: torch.Tensor) -> torch.Tensor:
+    """Plain BCE with Gaussian-smoothed targets for frame-level supervision."""
+    logits = logits.squeeze(-1)  # [B, T]
+    valid_mask = frame_gt >= 0
+    for i in range(logits.shape[0]):
+        seq_len = max(int(lengths[i]), 1)
+        valid_mask[i, seq_len:] = False
+    if not valid_mask.any():
+        return torch.tensor(0.0, device=logits.device)
+    pred = torch.sigmoid(logits[valid_mask])
+    target = frame_gt[valid_mask]
+    return F.binary_cross_entropy(pred, target)
+
+
 def smoothness_loss(logits: torch.Tensor, lengths: torch.Tensor) -> torch.Tensor:
     """Penalize sudden score changes giữa adjacent snippets."""
     scores = torch.sigmoid(logits.squeeze(-1))  # [B, T]
@@ -197,19 +212,19 @@ def train(model: VadInternVL,
 
         for i in pbar:
             # ── Fetch batch ──
-            n_feat, n_label, n_len, _ = next(normal_iter)
-            a_feat, a_label, a_len, _ = next(anomaly_iter)
+            n_feat, n_label, n_len, n_gt = next(normal_iter)
+            a_feat, a_label, a_len, a_gt = next(anomaly_iter)
 
             visual      = torch.cat([n_feat, a_feat], dim=0).to(device)
             text_labels = list(n_label) + list(a_label)
             lengths     = torch.cat([n_len, a_len], dim=0).to(device)
             bin_labels  = get_binary_label(text_labels).to(device)
+            frame_gts   = torch.cat([n_gt, a_gt], dim=0).to(device)
 
             # ── Forward ──
             logits, aux = model(visual, lengths, is_training=True)
             A_att = aux['A_att']   # [B, T]
             N_att = aux['N_att']   # [B, T]
-            x_feat = aux['x']      # [B, T, D]
 
             # ── Losses ──
             loss_mil = CLAS2(logits, bin_labels, lengths, device)
@@ -218,17 +233,13 @@ def train(model: VadInternVL,
                 A_att, N_att, bin_labels, lengths, device
             )
 
-            loss_tri = triplet_loss(
-                x_feat, A_att, N_att, lengths, bin_labels,
-                model.triplet_loss_fn
-            )
-
-            loss_sm = smoothness_loss(logits, lengths)
+            loss_bce = frame_bce_loss(logits, frame_gts, lengths)
+            loss_sm  = smoothness_loss(logits, lengths)
 
             loss = (loss_mil
-                    + args.lambda_mem     * loss_mem
-                    + args.lambda_triplet * loss_tri
-                    + args.mu_smooth      * loss_sm)
+                    + args.lambda_mem   * loss_mem
+                    + args.lambda_frame * loss_bce
+                    + args.mu_smooth    * loss_sm)
 
             loss_total += loss.item()
             avg_loss    = loss_total / (i + 1)
@@ -236,7 +247,7 @@ def train(model: VadInternVL,
             # ── Backward ──
             optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             global_step += 1
@@ -246,16 +257,18 @@ def train(model: VadInternVL,
                 "train/loss":         loss.item(),
                 "train/loss_mil":     loss_mil.item(),
                 "train/loss_mem":     loss_mem.item(),
-                "train/loss_triplet": loss_tri.item(),
+                "train/loss_bce":     loss_bce.item(),
                 "train/loss_smooth":  loss_sm.item(),
                 "train/lr":           optimizer.param_groups[0]['lr'],
+                "train/mem_gate":     torch.sigmoid(model.mem_gate).item(),
             }, step=global_step)
 
             pbar.set_postfix(
                 loss=f"{avg_loss:.4f}",
                 mil=f"{loss_mil.item():.3f}",
                 mem=f"{loss_mem.item():.3f}",
-                tri=f"{loss_tri.item():.3f}",
+                bce=f"{loss_bce.item():.3f}",
+                gate=f"{torch.sigmoid(model.mem_gate).item():.3f}",
                 lr=f"{optimizer.param_groups[0]['lr']:.1e}",
                 best=f"{auc_best:.4f}",
             )
@@ -387,7 +400,6 @@ if __name__ == '__main__':
             "scheduler_milestones": args.scheduler_milestones,
             "scheduler_rate":      args.scheduler_rate,
             "lambda_mem":          args.lambda_mem,
-            "lambda_triplet":      args.lambda_triplet,
             "mu_smooth":           args.mu_smooth,
         },
     )

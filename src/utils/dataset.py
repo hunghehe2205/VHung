@@ -12,19 +12,25 @@ from src.utils.tools import process_feat, process_split
 
 def build_frame_gt(events, n_frames, fps, feat_length, target_length,
                    normal_target=0.1, is_normal=False, sigma=3.0):
-    """Build snippet-level GT from HIVAU temporal events with Gaussian boundary smoothing."""
+    """Build snippet-level GT from HIVAU temporal events with Gaussian boundary smoothing.
+
+    After uniform_extract, output always has target_length snippets.
+    Snippet i corresponds to time i/target_length * duration.
+    So map seconds -> index using target_length directly (not raw feat_length).
+    For padded videos (raw < target), zero out padding region.
+    """
     frame_gt = torch.full((target_length,), normal_target if is_normal else 0.0)
 
     if is_normal or not events:
         return frame_gt
 
     duration = n_frames / fps
-    actual_len = min(feat_length, target_length)
     indices = torch.arange(target_length, dtype=torch.float32)
 
     for start_sec, end_sec in events:
-        start_idx = (start_sec / duration) * actual_len
-        end_idx = (end_sec / duration) * actual_len
+        # Map directly to extracted space (target_length snippets)
+        start_idx = (start_sec / duration) * target_length
+        end_idx = (end_sec / duration) * target_length
 
         ramp_up = torch.sigmoid((indices - start_idx) / sigma)
         ramp_down = torch.sigmoid((end_idx - indices) / sigma)
@@ -32,8 +38,9 @@ def build_frame_gt(events, n_frames, fps, feat_length, target_length,
 
         frame_gt = torch.max(frame_gt, event_gt)
 
-    if actual_len < target_length:
-        frame_gt[actual_len:] = 0.0
+    # Zero out padding region for short videos
+    if feat_length < target_length:
+        frame_gt[feat_length:] = 0.0
 
     return frame_gt
 

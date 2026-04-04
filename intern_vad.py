@@ -249,9 +249,7 @@ class VadInternVL(nn.Module):
         self.Amemory    = Memory_Unit(nums=a_nums, dim=visual_width)
         self.Nmemory    = Memory_Unit(nums=n_nums, dim=visual_width)
         self.encoder_mu = nn.Linear(visual_width, visual_width)
-
-        # ── NEW: Triplet loss (dùng trong training) ──
-        self.triplet_loss_fn = nn.TripletMarginLoss(margin=1.0)
+        self.mem_gate   = nn.Parameter(torch.zeros(1))  # init=0, learns to open
 
         self._initialize_parameters()
 
@@ -352,9 +350,9 @@ class VadInternVL(nn.Module):
         A_att, A_aug = self.Amemory(x)                  # [B,T], [B,T,D]
         N_att, N_aug = self.Nmemory(x)                  # [B,T], [B,T,D]
 
-        # Project và cộng vào x
+        # Project và cộng vào x (gated — starts near 0, learns to open)
         mem_aug = self.encoder_mu(A_aug + N_aug)        # [B, T, D]
-        x_mem   = x + mem_aug                           # [B, T, D]
+        x_mem   = x + torch.sigmoid(self.mem_gate) * mem_aug  # [B, T, D]
 
         # ── Classifier ──
         logits = self.classifier(x_mem + self.mlp2(x_mem))  # [B, T, 1]
@@ -363,7 +361,6 @@ class VadInternVL(nn.Module):
             aux_dict = {
                 'A_att': A_att,   # [B, T]
                 'N_att': N_att,   # [B, T]
-                'x'    : x,       # [B, T, D]  pre-memory, dùng cho triplet
             }
             return logits, aux_dict
 

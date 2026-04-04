@@ -12,20 +12,9 @@ from src.utils.tools import process_feat, process_split
 
 def build_frame_gt(events, n_frames, fps, feat_length, target_length,
                    normal_target=0.1, is_normal=False, sigma=3.0):
-    """Build snippet-level GT from HIVAU temporal events with Gaussian boundary smoothing.
+    """Build snippet-level GT from HIVAU temporal events with hard 0/1 targets.
 
     Events are in seconds. Mapping: seconds -> snippet index via duration and actual_len.
-    Instead of hard 0->1 at boundaries, applies Gaussian ramp to handle noisy MLLM annotations.
-
-    Args:
-        events: list of [start_sec, end_sec] from HIVAU (in seconds)
-        n_frames: total frames in video
-        fps: video fps
-        feat_length: actual number of snippets in raw feature (before pad/extract)
-        target_length: target dimension (256)
-        normal_target: soft target for normal videos
-        is_normal: whether this is a normal video
-        sigma: Gaussian std in snippet units for boundary smoothing
     """
     frame_gt = torch.full((target_length,), normal_target if is_normal else 0.0)
 
@@ -34,22 +23,14 @@ def build_frame_gt(events, n_frames, fps, feat_length, target_length,
 
     duration = n_frames / fps
     actual_len = min(feat_length, target_length)
-    indices = torch.arange(target_length, dtype=torch.float32)
 
     for start_sec, end_sec in events:
-        # Seconds -> snippet index (float for smooth mapping)
-        start_idx = (start_sec / duration) * actual_len
-        end_idx = (end_sec / duration) * actual_len
+        start_idx = int(round((start_sec / duration) * actual_len))
+        end_idx = int(round((end_sec / duration) * actual_len))
+        start_idx = max(0, min(start_idx, actual_len))
+        end_idx = max(0, min(end_idx, actual_len))
+        frame_gt[start_idx:end_idx] = 1.0
 
-        # Gaussian ramp up at start, ramp down at end
-        ramp_up = torch.sigmoid((indices - start_idx) / sigma)
-        ramp_down = torch.sigmoid((end_idx - indices) / sigma)
-        event_gt = ramp_up * ramp_down  # smooth bell-like shape over the event
-
-        # Max with existing (handles overlapping events)
-        frame_gt = torch.max(frame_gt, event_gt)
-
-    # Zero out padding region
     if actual_len < target_length:
         frame_gt[actual_len:] = 0.0
 

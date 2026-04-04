@@ -41,7 +41,7 @@ def test(model, testdataloader, maxlen, gt, device):
                     lengths[j] = remaining
             lengths = lengths.to(int)
 
-            logits = model(visual, lengths)
+            logits, _ = model(visual, lengths)
             logits = logits.reshape(logits.shape[0] * logits.shape[1], logits.shape[2])
             prob = torch.sigmoid(logits[0:len_cur].squeeze(-1))
 

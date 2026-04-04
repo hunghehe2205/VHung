@@ -28,3 +28,8 @@ parser.add_argument('--lambda-frame', default=0.3, type=float)
 parser.add_argument('--mu-smooth', default=0.05, type=float)
 parser.add_argument('--normal-target', default=0.05, type=float)
 parser.add_argument('--gauss-sigma', default=1.5, type=float)
+
+# Text contrastive
+parser.add_argument('--text-embed-path', default='text_embeddings.npz')
+parser.add_argument('--lambda-text', default=0.1, type=float,
+                    help='Weight for text contrastive loss')

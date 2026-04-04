@@ -76,6 +76,44 @@ def smoothness_loss(logits, lengths):
     return total / count
 
 
+def text_contrastive_loss(visual_features, text_labels, text_projected,
+                          category_order, lengths, temperature=0.07):
+    """Contrastive loss between video-level visual features and text prototypes.
+
+    For each video, pool snippet features → video embedding,
+    compute cosine similarity with all 14 text prototypes,
+    cross-entropy with the correct category index.
+    """
+    cat_to_idx = {cat: i for i, cat in enumerate(category_order)}
+
+    # Pool visual features per video: top-k mean (same as MIL)
+    pooled = []
+    targets = []
+    for i, label in enumerate(text_labels):
+        if label not in cat_to_idx:
+            continue
+        seq_len = max(int(lengths[i]), 1)
+        feat = visual_features[i, :seq_len]  # [T, D]
+        k = max(1, seq_len // 16)
+        # Use L2 norm magnitude as importance score
+        norms = feat.norm(dim=-1)  # [T]
+        topk_idx = norms.topk(k).indices
+        pooled_feat = feat[topk_idx].mean(dim=0)  # [D]
+        pooled.append(pooled_feat)
+        targets.append(cat_to_idx[label])
+
+    if len(pooled) == 0:
+        return torch.tensor(0.0, device=visual_features.device)
+
+    pooled = torch.stack(pooled)  # [B', D]
+    pooled = F.normalize(pooled, dim=-1)
+    targets = torch.tensor(targets, device=visual_features.device)
+
+    # Cosine similarity → cross-entropy
+    sim = pooled @ text_projected.T / temperature  # [B', N_cat]
+    return F.cross_entropy(sim, targets)
+
+
 def get_binary_label(text_labels):
     """Convert text labels to binary: [1,0] for Normal, [0,1] for Anomaly."""
     label_vectors = torch.zeros(len(text_labels), 2)
@@ -91,6 +129,12 @@ def train(model, normal_loader, anomaly_loader, testloader, args, device):
     model.to(device)
     os.makedirs(os.path.dirname(args.model_path), exist_ok=True)
     gt = np.load(args.gt_path)
+
+    # Load frozen text embeddings
+    text_data = np.load(args.text_embed_path)
+    text_embeddings = torch.from_numpy(text_data['embeddings']).float().to(device)
+    category_order = list(text_data['categories'])
+    text_projected = model.project_text(text_embeddings)  # [14, visual_width]
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     scheduler = MultiStepLR(optimizer, args.scheduler_milestones, args.scheduler_rate)
@@ -126,13 +170,22 @@ def train(model, normal_loader, anomaly_loader, testloader, args, device):
             binary_labels = get_binary_label(text_labels).to(device)
             frame_gts = torch.cat([normal_gt, anomaly_gt], dim=0).to(device)
 
-            logits = model(visual_features, feat_lengths)
+            logits, vis_feat = model(visual_features, feat_lengths)
+
+            # Re-project text each step (text_proj is trainable)
+            text_proj = model.project_text(text_embeddings)
 
             loss_mil = CLAS2(logits, binary_labels, feat_lengths, device)
             loss_bce = focal_loss(logits, frame_gts, feat_lengths)
             loss_sm = smoothness_loss(logits, feat_lengths)
+            loss_text = text_contrastive_loss(
+                vis_feat, text_labels, text_proj, category_order, feat_lengths
+            )
 
-            loss = loss_mil + args.lambda_frame * loss_bce + args.mu_smooth * loss_sm
+            loss = (loss_mil
+                    + args.lambda_frame * loss_bce
+                    + args.mu_smooth * loss_sm
+                    + args.lambda_text * loss_text)
             loss_total += loss.item()
             avg_loss = loss_total / (i + 1)
 
@@ -146,10 +199,12 @@ def train(model, normal_loader, anomaly_loader, testloader, args, device):
                 "train/loss_mil": loss_mil.item(),
                 "train/loss_focal": loss_bce.item(),
                 "train/loss_smooth": loss_sm.item(),
+                "train/loss_text": loss_text.item(),
                 "train/lr": optimizer.param_groups[0]['lr'],
             }, step=global_step)
 
-            pbar.set_postfix(loss=f"{avg_loss:.4f}", lr=f"{optimizer.param_groups[0]['lr']:.1e}", best_auc=f"{auc_best:.4f}")
+            pbar.set_postfix(loss=f"{avg_loss:.4f}", lr=f"{optimizer.param_groups[0]['lr']:.1e}",
+                             best=f"{auc_best:.4f}", text=f"{loss_text.item():.3f}")
 
             step = i * normal_loader.batch_size * 2
             if step % 1280 == 0 and step != 0:
@@ -205,9 +260,14 @@ if __name__ == '__main__':
     test_dataset = UCFDataset(args.visual_length, args.test_list, True)
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
+    # Determine text embedding dim from file
+    text_data = np.load(args.text_embed_path)
+    text_embed_dim = text_data['embeddings'].shape[1]
+
     model = VadInternVL(
         args.visual_length, args.visual_width, args.visual_head,
-        args.visual_layers, args.attn_window, device
+        args.visual_layers, args.attn_window, device,
+        text_embed_dim=text_embed_dim,
     )
 
     wandb.init(project="VadInternVL", config={
@@ -225,6 +285,8 @@ if __name__ == '__main__':
         "mu_smooth": args.mu_smooth,
         "normal_target": args.normal_target,
         "gauss_sigma": args.gauss_sigma,
+        "lambda_text": args.lambda_text,
+        "text_embed_dim": text_embed_dim,
     })
     wandb.watch(model, log="gradients", log_freq=100)
 

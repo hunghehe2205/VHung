@@ -116,7 +116,8 @@ class VadInternVL(nn.Module):
                  visual_head: int,
                  visual_layers: int,
                  attn_window: int,
-                 device):
+                 device,
+                 text_embed_dim: int = 0):
         super().__init__()
         self.visual_length = visual_length
         self.visual_width = visual_width
@@ -148,6 +149,13 @@ class VadInternVL(nn.Module):
 
         self.input_norm = LayerNorm(visual_width)
         self.frame_position_embeddings = nn.Embedding(visual_length, visual_width)
+
+        # Text projection: project text embeddings into visual feature space
+        self.text_embed_dim = text_embed_dim
+        if text_embed_dim > 0:
+            self.text_proj = nn.Linear(text_embed_dim, visual_width)
+            nn.init.normal_(self.text_proj.weight, std=0.02)
+            nn.init.zeros_(self.text_proj.bias)
 
         self.initialize_parameters()
 
@@ -222,7 +230,11 @@ class VadInternVL(nn.Module):
 
         return x
 
+    def project_text(self, text_embeddings):
+        """Project frozen text embeddings [N_cat, text_dim] → [N_cat, visual_width]."""
+        return F.normalize(self.text_proj(text_embeddings), dim=-1)
+
     def forward(self, visual, lengths):
         visual_features = self.encode_video(visual, None, lengths)
         logits = self.classifier(visual_features + self.mlp2(visual_features))
-        return logits
+        return logits, visual_features

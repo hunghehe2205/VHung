@@ -54,7 +54,7 @@ class DistanceAdj(nn.Module):
         arith = np.arange(max_seqlen).reshape(-1, 1)
         dist = pdist(arith, metric='cityblock').astype(np.float32)
         dist = torch.from_numpy(squareform(dist)).to(device)
-        dist = torch.exp(-dist / torch.exp(torch.tensor(1., device=device)))
+        dist = torch.exp(-dist / torch.exp(self.sigma))
         dist = dist.unsqueeze(0).repeat(batch_size, 1, 1)
         return dist
 
@@ -157,7 +157,7 @@ class VadInternVL(nn.Module):
         nn.init.zeros_(self.classifier.bias)
         for m in self.mlp2:
             if isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, std=0.001)
+                nn.init.normal_(m.weight, std=0.02)
                 nn.init.zeros_(m.bias)
 
     def build_attention_mask(self, attn_window):

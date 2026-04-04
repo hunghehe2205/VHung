@@ -12,10 +12,7 @@ from src.utils.tools import process_feat, process_split
 
 def build_frame_gt(events, n_frames, fps, feat_length, target_length,
                    normal_target=0.1, is_normal=False, sigma=3.0):
-    """Build snippet-level GT from HIVAU temporal events with hard 0/1 targets.
-
-    Events are in seconds. Mapping: seconds -> snippet index via duration and actual_len.
-    """
+    """Build snippet-level GT from HIVAU temporal events with Gaussian boundary smoothing."""
     frame_gt = torch.full((target_length,), normal_target if is_normal else 0.0)
 
     if is_normal or not events:
@@ -23,13 +20,17 @@ def build_frame_gt(events, n_frames, fps, feat_length, target_length,
 
     duration = n_frames / fps
     actual_len = min(feat_length, target_length)
+    indices = torch.arange(target_length, dtype=torch.float32)
 
     for start_sec, end_sec in events:
-        start_idx = int(round((start_sec / duration) * actual_len))
-        end_idx = int(round((end_sec / duration) * actual_len))
-        start_idx = max(0, min(start_idx, actual_len))
-        end_idx = max(0, min(end_idx, actual_len))
-        frame_gt[start_idx:end_idx] = 1.0
+        start_idx = (start_sec / duration) * actual_len
+        end_idx = (end_sec / duration) * actual_len
+
+        ramp_up = torch.sigmoid((indices - start_idx) / sigma)
+        ramp_down = torch.sigmoid((end_idx - indices) / sigma)
+        event_gt = ramp_up * ramp_down
+
+        frame_gt = torch.max(frame_gt, event_gt)
 
     if actual_len < target_length:
         frame_gt[actual_len:] = 0.0

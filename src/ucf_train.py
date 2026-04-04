@@ -33,8 +33,8 @@ def CLAS2(logits, labels, lengths, device):
     return clsloss
 
 
-def frame_bce_loss(logits, frame_gt, lengths):
-    """Plain BCE loss with Gaussian-smoothed targets for frame-level supervision."""
+def focal_loss(logits, frame_gt, lengths, alpha=0.75, gamma=2.0):
+    """Focal loss with Gaussian-smoothed targets for frame-level supervision."""
     logits = logits.squeeze(-1)  # (B, T)
     B, T = logits.shape
 
@@ -49,7 +49,12 @@ def frame_bce_loss(logits, frame_gt, lengths):
     pred = torch.sigmoid(logits[valid_mask])
     target = frame_gt[valid_mask]
 
-    return F.binary_cross_entropy(pred, target)
+    bce = F.binary_cross_entropy(pred, target, reduction='none')
+    p_t = pred * target + (1 - pred) * (1 - target)
+    alpha_t = alpha * target + (1 - alpha) * (1 - target)
+    focal_weight = alpha_t * (1 - p_t) ** gamma
+
+    return (focal_weight * bce).mean()
 
 
 def smoothness_loss(logits, lengths):
@@ -124,7 +129,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, device):
             logits = model(visual_features, feat_lengths)
 
             loss_mil = CLAS2(logits, binary_labels, feat_lengths, device)
-            loss_bce = frame_bce_loss(logits, frame_gts, feat_lengths)
+            loss_bce = focal_loss(logits, frame_gts, feat_lengths)
             loss_sm = smoothness_loss(logits, feat_lengths)
 
             loss = loss_mil + args.lambda_frame * loss_bce + args.mu_smooth * loss_sm
@@ -139,7 +144,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, device):
             wandb.log({
                 "train/loss": loss.item(),
                 "train/loss_mil": loss_mil.item(),
-                "train/loss_bce": loss_bce.item(),
+                "train/loss_focal": loss_bce.item(),
                 "train/loss_smooth": loss_sm.item(),
                 "train/lr": optimizer.param_groups[0]['lr'],
             }, step=global_step)

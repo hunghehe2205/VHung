@@ -209,6 +209,8 @@ class VadInternVL(nn.Module):
         x, _ = self.temporal((images, None))
         x = x.permute(1, 0, 2)
 
+        x_transformer = x  # preserve transformer output
+
         adj = self.adj4(x, lengths)
         disadj = self.disAdj(x.shape[0], x.shape[1], x.device)
         x1_h = self.gelu(self.gc1(x, adj))
@@ -217,10 +219,10 @@ class VadInternVL(nn.Module):
         x1 = self.gelu(self.gc2(x1_h, adj))
         x2 = self.gelu(self.gc4(x2_h, disadj))
 
-        x = torch.cat((x1, x2), 2)
-        x = self.linear(x)
+        x_gcn = torch.cat((x1, x2), 2)
+        x_gcn = self.linear(x_gcn)
 
-        return x
+        return x_gcn + x_transformer
 
     def forward(self, visual, lengths):
         visual_features = self.encode_video(visual, None, lengths)

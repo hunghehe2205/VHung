@@ -98,6 +98,7 @@ class CLIPVAD(nn.Module):
             ("c_proj", nn.Linear(visual_width * 4, visual_width))
         ]))
         self.classifier = nn.Linear(visual_width, 1)
+        self.classifier_sup = nn.Linear(visual_width, 1)
 
         self.clipmodel, _ = clip.load("ViT-B/16", device)
         for clip_param in self.clipmodel.parameters():
@@ -185,6 +186,7 @@ class CLIPVAD(nn.Module):
     def forward(self, visual, padding_mask, text, lengths):
         visual_features = self.encode_video(visual, padding_mask, lengths)
         logits1 = self.classifier(visual_features + self.mlp2(visual_features))
+        logits1_sup = self.classifier_sup(visual_features.detach() + self.mlp2(visual_features).detach())
 
         text_features_ori = self.encode_textprompt(text)
 
@@ -203,4 +205,4 @@ class CLIPVAD(nn.Module):
         text_features_norm = text_features_norm.permute(0, 2, 1)
         logits2 = visual_features_norm @ text_features_norm.type(visual_features_norm.dtype) / 0.07
 
-        return text_features_ori, logits1, logits2
+        return text_features_ori, logits1, logits2, logits1_sup

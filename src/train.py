@@ -28,23 +28,14 @@ def CLASM(logits, labels, lengths, device):
     return milloss
 
 
-def CLAS2(logits, labels, lengths, device, frame_gt=None, boost_alpha=3.0):
+def CLAS2(logits, labels, lengths, device):
     instance_logits = torch.zeros(0).to(device)
     labels = 1 - labels[:, 0].reshape(labels.shape[0])
     labels = labels.to(device)
     logits = torch.sigmoid(logits).reshape(logits.shape[0], logits.shape[1])
 
     for i in range(logits.shape[0]):
-        k = int(lengths[i] / 16 + 1)
-        scores = logits[i, 0:lengths[i]]
-        # HIVAU-guided: boost anomaly frame scores before top-k selection
-        if frame_gt is not None and frame_gt[i, 0:lengths[i]].sum() > 0:
-            boost = frame_gt[i, 0:lengths[i]] * boost_alpha
-            scores_boosted = scores + boost
-            _, indices = torch.topk(scores_boosted, k=k, largest=True)
-            tmp = scores[indices]  # use original scores for loss, not boosted
-        else:
-            tmp, _ = torch.topk(scores, k=k, largest=True)
+        tmp, _ = torch.topk(logits[i, 0:lengths[i]], k=int(lengths[i] / 16 + 1), largest=True)
         tmp = torch.mean(tmp).view(1)
         instance_logits = torch.cat([instance_logits, tmp], dim=0)
 
@@ -95,9 +86,9 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             frame_gt = torch.cat([normal_gt, anomaly_gt], dim=0).to(device)
             text_labels = get_batch_label(text_labels, prompt_text, label_map).to(device)
 
-            text_features, logits1, logits2 = model(visual_features, None, prompt_text, feat_lengths)
+            text_features, logits1, logits2, logits1_sup = model(visual_features, None, prompt_text, feat_lengths)
 
-            loss1 = CLAS2(logits1, text_labels, feat_lengths, device, frame_gt, args.boost_alpha)
+            loss1 = CLAS2(logits1, text_labels, feat_lengths, device)
             loss_total1 += loss1.item()
 
             loss2 = CLASM(logits2, text_labels, feat_lengths, device)
@@ -111,7 +102,29 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                 loss3 += torch.abs(text_feature_normal @ text_feature_abr)
             loss3 = loss3 / 13 * 1e-1
 
-            loss = loss1 + loss2 + loss3
+            # Decoupled supervision loss (only on classifier_sup, detached from backbone)
+            loss_sup = torch.zeros(1).to(device)
+            if args.lambda_sup > 0:
+                logits_sup_flat = logits1_sup.squeeze(-1)
+                batch_size = logits_sup_flat.shape[0]
+                half = batch_size // 2
+                count = 0
+                for k in range(half, batch_size):
+                    length_k = feat_lengths[k]
+                    target = frame_gt[k, :length_k]
+                    if target.sum() == 0:
+                        continue
+                    pred = torch.sigmoid(logits_sup_flat[k, :length_k])
+                    pt = pred * target + (1 - pred) * (1 - target)
+                    focal_weight = (1 - pt) ** args.focal_gamma
+                    alpha = target * args.focal_alpha + (1 - target) * (1 - args.focal_alpha)
+                    bce = -target * torch.log(pred + 1e-8) - (1 - target) * torch.log(1 - pred + 1e-8)
+                    loss_sup += (alpha * focal_weight * bce).mean()
+                    count += 1
+                if count > 0:
+                    loss_sup = loss_sup / count
+
+            loss = loss1 + loss2 + loss3 + args.lambda_sup * loss_sup
 
             optimizer.zero_grad()
             loss.backward()
@@ -119,7 +132,8 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
 
             pbar.set_postfix(loss1=loss_total1 / (i + 1),
                              loss2=loss_total2 / (i + 1),
-                             loss3=loss3.item())
+                             loss3=loss3.item(),
+                             loss_sup=loss_sup.item())
 
             step += i * normal_loader.batch_size * 2
             if step % 1280 == 0 and step != 0:

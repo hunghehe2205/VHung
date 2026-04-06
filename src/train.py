@@ -137,6 +137,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
 
             step += i * normal_loader.batch_size * 2
             if step % 1280 == 0 and step != 0:
+                print(f'\n[Step {step}] loss1={loss1.item():.4f} loss2={loss2.item():.4f} loss3={loss3.item():.4f} loss_sup={loss_sup.item():.6f} (count={count if args.lambda_sup > 0 else 0})')
                 AUC, AP = test(model, testloader, args.visual_length, prompt_text,
                                gt, gtsegments, gtlabels, device)
                 AP = AUC

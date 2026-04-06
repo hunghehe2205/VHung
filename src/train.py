@@ -6,6 +6,7 @@ from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import MultiStepLR
 import numpy as np
 import random
+from tqdm import tqdm
 
 from model import CLIPVAD
 from test import test, LABEL_MAP
@@ -63,7 +64,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         print("checkpoint info:")
         print("epoch:", epoch + 1, " ap:", ap_best)
 
-    os.makedirs('model', exist_ok=True)
+    os.makedirs('final_model', exist_ok=True)
 
     for e in range(args.max_epoch):
         model.train()
@@ -71,8 +72,10 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         loss_total2 = 0
         normal_iter = iter(normal_loader)
         anomaly_iter = iter(anomaly_loader)
+        num_iters = min(len(normal_loader), len(anomaly_loader))
+        pbar = tqdm(range(num_iters), desc=f'Epoch {e+1}/{args.max_epoch}')
 
-        for i in range(min(len(normal_loader), len(anomaly_loader))):
+        for i in pbar:
             step = 0
             normal_features, normal_label, normal_lengths, normal_gt = next(normal_iter)
             anomaly_features, anomaly_label, anomaly_lengths, anomaly_gt = next(anomaly_iter)
@@ -115,13 +118,13 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             loss.backward()
             optimizer.step()
 
+            pbar.set_postfix(loss1=loss_total1 / (i + 1),
+                             loss2=loss_total2 / (i + 1),
+                             loss3=loss3.item(),
+                             loss_sup=loss_sup.item())
+
             step += i * normal_loader.batch_size * 2
             if step % 1280 == 0 and step != 0:
-                print('epoch: ', e + 1, '| step: ', step,
-                      '| loss1: ', loss_total1 / (i + 1),
-                      '| loss2: ', loss_total2 / (i + 1),
-                      '| loss3: ', loss3.item(),
-                      '| loss_sup: ', loss_sup.item())
                 AUC, AP = test(model, testloader, args.visual_length, prompt_text,
                                gt, gtsegments, gtlabels, device)
                 AP = AUC
@@ -137,7 +140,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
 
         scheduler.step()
 
-        torch.save(model.state_dict(), 'model/model_cur.pth')
+        torch.save(model.state_dict(), 'final_model/model_cur.pth')
         checkpoint = torch.load(args.checkpoint_path)
         model.load_state_dict(checkpoint['model_state_dict'])
 

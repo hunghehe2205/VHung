@@ -22,9 +22,9 @@ parser.add_argument('--scheduler-rate', default=0.1, type=float)
 parser.add_argument('--scheduler-milestones', default=[4, 8], nargs='+', type=int)
 
 # Paths
-parser.add_argument('--model-path', default='model/model_ucf.pth')
+parser.add_argument('--model-path', default='final_model/model_ucf.pth')
 parser.add_argument('--use-checkpoint', default=False, type=bool)
-parser.add_argument('--checkpoint-path', default='model/checkpoint.pth')
+parser.add_argument('--checkpoint-path', default='final_model/checkpoint.pth')
 parser.add_argument('--train-list', default='list/ucf_CLIP_rgb.csv')
 parser.add_argument('--test-list', default='list/ucf_CLIP_rgbtest.csv')
 parser.add_argument('--gt-path', default='list/gt_ucf.npy')

@@ -102,15 +102,26 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                 loss3 += torch.abs(text_feature_normal @ text_feature_abr)
             loss3 = loss3 / 13 * 1e-1
 
-            # Supervised loss from HIVAU annotations
+            # Supervised focal loss from HIVAU annotations (anomaly videos only)
             loss_sup = torch.zeros(1).to(device)
             if args.lambda_sup > 0:
-                logits1_sig = torch.sigmoid(logits1.squeeze(-1))
-                for k in range(logits1_sig.shape[0]):
+                logits1_flat = logits1.squeeze(-1)
+                batch_size = logits1_flat.shape[0]
+                half = batch_size // 2  # first half = normal, second half = anomaly
+                count = 0
+                for k in range(half, batch_size):
                     length_k = feat_lengths[k]
-                    loss_sup += F.binary_cross_entropy(
-                        logits1_sig[k, :length_k], frame_gt[k, :length_k])
-                loss_sup = loss_sup / logits1_sig.shape[0]
+                    pred = torch.sigmoid(logits1_flat[k, :length_k])
+                    target = frame_gt[k, :length_k]
+                    # Focal loss: -alpha * (1-pt)^gamma * log(pt)
+                    pt = pred * target + (1 - pred) * (1 - target)
+                    focal_weight = (1 - pt) ** args.focal_gamma
+                    alpha = target * args.focal_alpha + (1 - target) * (1 - args.focal_alpha)
+                    bce = -target * torch.log(pred + 1e-8) - (1 - target) * torch.log(1 - pred + 1e-8)
+                    loss_sup += (alpha * focal_weight * bce).mean()
+                    count += 1
+                if count > 0:
+                    loss_sup = loss_sup / count
 
             loss = loss1 + loss2 + loss3 + args.lambda_sup * loss_sup
 

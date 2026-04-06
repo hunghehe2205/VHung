@@ -12,7 +12,6 @@ Outputs (in list/ folder):
     - gt_segment_ucf.npy     (segment-level GT)
     - gt_label_ucf.npy       (segment labels)
 """
-import argparse
 import os
 import csv
 import numpy as np
@@ -159,27 +158,27 @@ def make_gt_segment(test_csv, annotation_txt, segment_path, label_path):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--feature-root', required=True, help='Path to UCFClipFeatures/')
-    parser.add_argument('--data-dir', default='../data', help='Path to data/ with txt annotations')
-    parser.add_argument('--list-dir', default='list', help='Output directory for lists')
-    args = parser.parse_args()
+    # ===== CONFIG: sửa đường dẫn ở đây =====
+    FEATURE_ROOT = '/home/emogenai4e/emo/VHung/UCFClipFeatures'
+    DATA_DIR = '../data'
+    LIST_DIR = 'list'
+    # =========================================
 
-    os.makedirs(args.list_dir, exist_ok=True)
+    os.makedirs(LIST_DIR, exist_ok=True)
 
-    train_txt = os.path.join(args.data_dir, 'Anomaly_Train.txt')
-    test_txt = os.path.join(args.data_dir, 'Anomaly_Test.txt')
-    annotation_txt = os.path.join(args.data_dir, 'Temporal_Anomaly_Annotation_for_Testing_Videos.txt')
+    train_txt = os.path.join(DATA_DIR, 'Anomaly_Train.txt')
+    test_txt = os.path.join(DATA_DIR, 'Anomaly_Test.txt')
+    annotation_txt = os.path.join(DATA_DIR, 'Temporal_Anomaly_Annotation_for_Testing_Videos.txt')
 
-    train_csv = os.path.join(args.list_dir, 'ucf_CLIP_rgb.csv')
-    test_csv = os.path.join(args.list_dir, 'ucf_CLIP_rgbtest.csv')
-    gt_path = os.path.join(args.list_dir, 'gt_ucf.npy')
-    gt_segment_path = os.path.join(args.list_dir, 'gt_segment_ucf.npy')
-    gt_label_path = os.path.join(args.list_dir, 'gt_label_ucf.npy')
+    train_csv = os.path.join(LIST_DIR, 'ucf_CLIP_rgb.csv')
+    test_csv = os.path.join(LIST_DIR, 'ucf_CLIP_rgbtest.csv')
+    gt_path = os.path.join(LIST_DIR, 'gt_ucf.npy')
+    gt_segment_path = os.path.join(LIST_DIR, 'gt_segment_ucf.npy')
+    gt_label_path = os.path.join(LIST_DIR, 'gt_label_ucf.npy')
 
     # Step 1: Generate CSV lists
-    make_train_list(args.feature_root, train_txt, train_csv)
-    make_test_list(args.feature_root, test_txt, test_csv)
+    make_train_list(FEATURE_ROOT, train_txt, train_csv)
+    make_test_list(FEATURE_ROOT, test_txt, test_csv)
 
     # Step 2: Generate ground truth (requires test CSV + features)
     make_gt(test_csv, annotation_txt, gt_path)

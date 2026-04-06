@@ -74,12 +74,13 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
 
         for i in range(min(len(normal_loader), len(anomaly_loader))):
             step = 0
-            normal_features, normal_label, normal_lengths = next(normal_iter)
-            anomaly_features, anomaly_label, anomaly_lengths = next(anomaly_iter)
+            normal_features, normal_label, normal_lengths, normal_gt = next(normal_iter)
+            anomaly_features, anomaly_label, anomaly_lengths, anomaly_gt = next(anomaly_iter)
 
             visual_features = torch.cat([normal_features, anomaly_features], dim=0).to(device)
             text_labels = list(normal_label) + list(anomaly_label)
             feat_lengths = torch.cat([normal_lengths, anomaly_lengths], dim=0).to(device)
+            frame_gt = torch.cat([normal_gt, anomaly_gt], dim=0).to(device)
             text_labels = get_batch_label(text_labels, prompt_text, label_map).to(device)
 
             text_features, logits1, logits2 = model(visual_features, None, prompt_text, feat_lengths)
@@ -98,7 +99,17 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                 loss3 += torch.abs(text_feature_normal @ text_feature_abr)
             loss3 = loss3 / 13 * 1e-1
 
-            loss = loss1 + loss2 + loss3
+            # Supervised loss from HIVAU annotations
+            loss_sup = torch.zeros(1).to(device)
+            if args.lambda_sup > 0:
+                logits1_sig = torch.sigmoid(logits1.squeeze(-1))
+                for k in range(logits1_sig.shape[0]):
+                    length_k = feat_lengths[k]
+                    loss_sup += F.binary_cross_entropy(
+                        logits1_sig[k, :length_k], frame_gt[k, :length_k])
+                loss_sup = loss_sup / logits1_sig.shape[0]
+
+            loss = loss1 + loss2 + loss3 + args.lambda_sup * loss_sup
 
             optimizer.zero_grad()
             loss.backward()
@@ -109,7 +120,8 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                 print('epoch: ', e + 1, '| step: ', step,
                       '| loss1: ', loss_total1 / (i + 1),
                       '| loss2: ', loss_total2 / (i + 1),
-                      '| loss3: ', loss3.item())
+                      '| loss3: ', loss3.item(),
+                      '| loss_sup: ', loss_sup.item())
                 AUC, AP = test(model, testloader, args.visual_length, prompt_text,
                                gt, gtsegments, gtlabels, device)
                 AP = AUC
@@ -145,9 +157,9 @@ if __name__ == '__main__':
     args = option.parser.parse_args()
     setup_seed(args.seed)
 
-    normal_dataset = UCFDataset(args.visual_length, args.train_list, False, LABEL_MAP, True)
+    normal_dataset = UCFDataset(args.visual_length, args.train_list, False, LABEL_MAP, True, args.hivau_json)
     normal_loader = DataLoader(normal_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
-    anomaly_dataset = UCFDataset(args.visual_length, args.train_list, False, LABEL_MAP, False)
+    anomaly_dataset = UCFDataset(args.visual_length, args.train_list, False, LABEL_MAP, False, args.hivau_json)
     anomaly_loader = DataLoader(anomaly_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
 
     test_dataset = UCFDataset(args.visual_length, args.test_list, True, LABEL_MAP)

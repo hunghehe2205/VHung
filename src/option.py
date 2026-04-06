@@ -30,3 +30,7 @@ parser.add_argument('--test-list', default='list/ucf_CLIP_rgbtest.csv')
 parser.add_argument('--gt-path', default='list/gt_ucf.npy')
 parser.add_argument('--gt-segment-path', default='list/gt_segment_ucf.npy')
 parser.add_argument('--gt-label-path', default='list/gt_label_ucf.npy')
+
+# HIVAU supervision
+parser.add_argument('--hivau-json', default='../HIVAU-70k-NEW/ucf_database_train.json')
+parser.add_argument('--lambda-sup', default=1.0, type=float)

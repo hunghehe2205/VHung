@@ -29,6 +29,7 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, d
         for i, item in enumerate(testdataloader):
             visual = item[0].squeeze(0)
             length = int(item[2])
+            # item[3] is frame_gt, not needed for test
             len_cur = length
 
             if len_cur < maxlen:

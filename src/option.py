@@ -36,3 +36,5 @@ parser.add_argument('--hivau-json', default='../HIVAU-70k-NEW/ucf_database_train
 parser.add_argument('--lambda-sup', default=0.1, type=float)
 parser.add_argument('--focal-alpha', default=0.75, type=float)
 parser.add_argument('--focal-gamma', default=2.0, type=float)
+parser.add_argument('--boundary-margin', default=3, type=int)
+parser.add_argument('--label-smooth', default=0.05, type=float)

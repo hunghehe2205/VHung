@@ -135,7 +135,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                              loss_sup=loss_sup.item())
 
             step += i * normal_loader.batch_size * 2
-            if step % 1280 == 0 and step != 0:
+            if step % 2560 == 0 and step != 0:
                 AUC, AP = test(model, testloader, args.visual_length, prompt_text,
                                gt, gtsegments, gtlabels, device)
                 AP = AUC
@@ -171,9 +171,11 @@ if __name__ == '__main__':
     args = option.parser.parse_args()
     setup_seed(args.seed)
 
-    normal_dataset = UCFDataset(args.visual_length, args.train_list, False, LABEL_MAP, True, args.hivau_json)
+    normal_dataset = UCFDataset(args.visual_length, args.train_list, False, LABEL_MAP, True,
+                                args.hivau_json, args.boundary_margin, args.label_smooth)
     normal_loader = DataLoader(normal_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
-    anomaly_dataset = UCFDataset(args.visual_length, args.train_list, False, LABEL_MAP, False, args.hivau_json)
+    anomaly_dataset = UCFDataset(args.visual_length, args.train_list, False, LABEL_MAP, False,
+                                 args.hivau_json, args.boundary_margin, args.label_smooth)
     anomaly_loader = DataLoader(anomaly_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
 
     test_dataset = UCFDataset(args.visual_length, args.test_list, True, LABEL_MAP)

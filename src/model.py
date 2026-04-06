@@ -189,7 +189,7 @@ class CLIPVAD(nn.Module):
         text_features_ori = self.encode_textprompt(text)
 
         text_features = text_features_ori
-        logits_attn = logits1.detach().permute(0, 2, 1)
+        logits_attn = logits1.permute(0, 2, 1)
         visual_attn = logits_attn @ visual_features
         visual_attn = visual_attn / visual_attn.norm(dim=-1, keepdim=True)
         visual_attn = visual_attn.expand(visual_attn.shape[0], text_features_ori.shape[0], visual_attn.shape[2])

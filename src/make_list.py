@@ -68,13 +68,10 @@ def make_test_list(feature_root, test_txt, output_csv):
                 print(f"[MISS] {base_path}")
                 continue
 
-            prefix = base_path[:-5]
             if 'Normal' in label:
-                for i in range(10):
-                    normal.append(prefix + str(i) + '.npy')
+                normal.append(base_path)
             else:
-                for i in range(10):
-                    writer.writerow([prefix + str(i) + '.npy', label])
+                writer.writerow([base_path, label])
 
         for file in normal:
             writer.writerow([file, 'Normal'])
@@ -151,8 +148,8 @@ def make_gt_segment(test_csv, annotation_txt, segment_path, label_path):
         gt_segment.append(segment)
         gt_label.append(label)
 
-    np.save(segment_path, gt_segment)
-    np.save(label_path, gt_label)
+    np.save(segment_path, np.array(gt_segment, dtype=object), allow_pickle=True)
+    np.save(label_path, np.array(gt_label, dtype=object), allow_pickle=True)
     print(f"[OK] GT segments: {segment_path}")
     print(f"[OK] GT labels: {label_path}")
 

@@ -75,8 +75,8 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         num_iters = min(len(normal_loader), len(anomaly_loader))
         pbar = tqdm(range(num_iters), desc=f'Epoch {e+1}/{args.max_epoch}')
 
-        eval_every = 20  # evaluate every 20 iterations
         for i in pbar:
+            step = 0
             normal_features, normal_label, normal_lengths, normal_gt = next(normal_iter)
             anomaly_features, anomaly_label, anomaly_lengths, anomaly_gt = next(anomaly_iter)
 
@@ -127,7 +127,6 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
 
             optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             pbar.set_postfix(loss1=loss_total1 / (i + 1),
@@ -135,7 +134,8 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                              loss3=loss3.item(),
                              loss_sup=loss_sup.item())
 
-            if (i + 1) % eval_every == 0:
+            step += i * normal_loader.batch_size * 2
+            if step % 2560 == 0 and step != 0:
                 AUC, AP = test(model, testloader, args.visual_length, prompt_text,
                                gt, gtsegments, gtlabels, device)
                 AP = AUC
@@ -151,6 +151,8 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
 
         scheduler.step()
         torch.save(model.state_dict(), 'final_model/model_cur.pth')
+        checkpoint = torch.load(args.checkpoint_path, weights_only=False)
+        model.load_state_dict(checkpoint['model_state_dict'])
 
     checkpoint = torch.load(args.checkpoint_path, weights_only=False)
     torch.save(checkpoint['model_state_dict'], args.model_path)

@@ -27,6 +27,9 @@ class UCFDataset(data.Dataset):
         if hivau_json and os.path.exists(hivau_json):
             with open(hivau_json) as f:
                 self.hivau = json.load(f)
+            print(f'[Dataset] Loaded HIVAU: {len(self.hivau)} videos from {hivau_json}')
+        elif hivau_json:
+            print(f'[Dataset] WARNING: HIVAU file not found: {hivau_json} (cwd={os.getcwd()})')
 
     def _get_frame_gt(self, path, feat_len):
         """Convert HIVAU temporal events to feature-level binary GT."""

@@ -28,3 +28,4 @@ output_infer/
 # OS
 .DS_Store
 Thumbs.db
+final_model/

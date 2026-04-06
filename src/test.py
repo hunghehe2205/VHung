@@ -80,21 +80,6 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, d
     print("AUC1: ", ROC1, " AP1: ", AP1)
     print("AUC2: ", ROC2, " AP2:", AP2)
 
-    # Ensemble: alpha * prob1 + (1-alpha) * prob2
-    ap1_np = np.array(ap1)
-    ap2_np = np.array(ap2)
-    best_auc_ens = 0
-    best_alpha = 0
-    for alpha in np.arange(0.0, 1.05, 0.1):
-        ens = alpha * ap1_np + (1 - alpha) * ap2_np
-        auc_ens = roc_auc_score(gt, np.repeat(ens, 16))
-        if auc_ens > best_auc_ens:
-            best_auc_ens = auc_ens
-            best_alpha = alpha
-    ens_final = best_alpha * ap1_np + (1 - best_alpha) * ap2_np
-    AP_ens = average_precision_score(gt, np.repeat(ens_final, 16))
-    print(f"Ensemble (alpha={best_alpha:.1f}): AUC={best_auc_ens:.4f}  AP={AP_ens:.4f}")
-
     dmap, iou = dmAP(element_logits2_stack, gtsegments, gtlabels, excludeNormal=False)
     averageMAP = 0
     for i in range(5):
@@ -103,7 +88,7 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, d
     averageMAP = averageMAP / (i + 1)
     print('average MAP: {:.2f}'.format(averageMAP))
 
-    return best_auc_ens, AP_ens
+    return ROC1, AP1
 
 
 if __name__ == '__main__':

@@ -20,7 +20,7 @@ LABEL_MAP = {
 }
 
 
-def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, device, fusion_alpha=0.5):
+def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, device):
     model.to(device)
     model.eval()
 
@@ -51,14 +51,11 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, d
             lengths = lengths.to(int)
             padding_mask = get_batch_mask(lengths, maxlen).to(device)
 
-            _, logits1, logits2, logits1_sup = model(visual, padding_mask, prompt_text, lengths)
+            _, logits1, logits2 = model(visual, padding_mask, prompt_text, lengths)
             logits1 = logits1.reshape(logits1.shape[0] * logits1.shape[1], logits1.shape[2])
-            logits1_sup = logits1_sup.reshape(logits1_sup.shape[0] * logits1_sup.shape[1], logits1_sup.shape[2])
             logits2 = logits2.reshape(logits2.shape[0] * logits2.shape[1], logits2.shape[2])
             prob2 = (1 - logits2[0:len_cur].softmax(dim=-1)[:, 0].squeeze(-1))
-            prob1_orig = torch.sigmoid(logits1[0:len_cur].squeeze(-1))
-            prob1_sup = torch.sigmoid(logits1_sup[0:len_cur].squeeze(-1))
-            prob1 = fusion_alpha * prob1_orig + (1 - fusion_alpha) * prob1_sup
+            prob1 = torch.sigmoid(logits1[0:len_cur].squeeze(-1))
 
             if i == 0:
                 ap1 = prob1

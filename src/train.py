@@ -77,16 +77,15 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
 
         for i in pbar:
             step = 0
-            normal_features, normal_label, normal_lengths, normal_gt = next(normal_iter)
-            anomaly_features, anomaly_label, anomaly_lengths, anomaly_gt = next(anomaly_iter)
+            normal_features, normal_label, normal_lengths = next(normal_iter)
+            anomaly_features, anomaly_label, anomaly_lengths = next(anomaly_iter)
 
             visual_features = torch.cat([normal_features, anomaly_features], dim=0).to(device)
             text_labels = list(normal_label) + list(anomaly_label)
             feat_lengths = torch.cat([normal_lengths, anomaly_lengths], dim=0).to(device)
-            frame_gt = torch.cat([normal_gt, anomaly_gt], dim=0).to(device)
             text_labels = get_batch_label(text_labels, prompt_text, label_map).to(device)
 
-            text_features, logits1, logits2, logits1_sup = model(visual_features, None, prompt_text, feat_lengths)
+            text_features, logits1, logits2 = model(visual_features, None, prompt_text, feat_lengths)
 
             loss1 = CLAS2(logits1, text_labels, feat_lengths, device)
             loss_total1 += loss1.item()
@@ -102,29 +101,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                 loss3 += torch.abs(text_feature_normal @ text_feature_abr)
             loss3 = loss3 / 13 * 1e-1
 
-            # Decoupled supervision loss (only on classifier_sup, detached from backbone)
-            loss_sup = torch.zeros(1).to(device)
-            if args.lambda_sup > 0:
-                logits_sup_flat = logits1_sup.squeeze(-1)
-                batch_size = logits_sup_flat.shape[0]
-                half = batch_size // 2
-                count = 0
-                for k in range(half, batch_size):
-                    length_k = feat_lengths[k]
-                    target = frame_gt[k, :length_k]
-                    if target.sum() == 0:
-                        continue
-                    pred = torch.sigmoid(logits_sup_flat[k, :length_k])
-                    pt = pred * target + (1 - pred) * (1 - target)
-                    focal_weight = (1 - pt) ** args.focal_gamma
-                    alpha = target * args.focal_alpha + (1 - target) * (1 - args.focal_alpha)
-                    bce = -target * torch.log(pred + 1e-8) - (1 - target) * torch.log(1 - pred + 1e-8)
-                    loss_sup += (alpha * focal_weight * bce).mean()
-                    count += 1
-                if count > 0:
-                    loss_sup = loss_sup / count
-
-            loss = loss1 + loss2 + loss3 + args.lambda_sup * loss_sup
+            loss = loss1 + loss2 + loss3
 
             optimizer.zero_grad()
             loss.backward()
@@ -132,12 +109,10 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
 
             pbar.set_postfix(loss1=loss_total1 / (i + 1),
                              loss2=loss_total2 / (i + 1),
-                             loss3=loss3.item(),
-                             loss_sup=loss_sup.item())
+                             loss3=loss3.item())
 
             step += i * normal_loader.batch_size * 2
             if step % 1280 == 0 and step != 0:
-                print(f'\n[Step {step}] loss1={loss1.item():.4f} loss2={loss2.item():.4f} loss3={loss3.item():.4f} loss_sup={loss_sup.item():.6f} (count={count if args.lambda_sup > 0 else 0})')
                 AUC, AP = test(model, testloader, args.visual_length, prompt_text,
                                gt, gtsegments, gtlabels, device)
                 AP = AUC
@@ -172,16 +147,18 @@ if __name__ == '__main__':
     args = option.parser.parse_args()
     setup_seed(args.seed)
 
-    normal_dataset = UCFDataset(args.visual_length, args.train_list, False, LABEL_MAP, True, args.hivau_json)
+    label_map = LABEL_MAP
+
+    normal_dataset = UCFDataset(args.visual_length, args.train_list, False, label_map, True)
     normal_loader = DataLoader(normal_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
-    anomaly_dataset = UCFDataset(args.visual_length, args.train_list, False, LABEL_MAP, False, args.hivau_json)
+    anomaly_dataset = UCFDataset(args.visual_length, args.train_list, False, label_map, False)
     anomaly_loader = DataLoader(anomaly_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
 
-    test_dataset = UCFDataset(args.visual_length, args.test_list, True, LABEL_MAP)
+    test_dataset = UCFDataset(args.visual_length, args.test_list, True, label_map)
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
     model = CLIPVAD(args.classes_num, args.embed_dim, args.visual_length, args.visual_width,
                     args.visual_head, args.visual_layers, args.attn_window,
                     args.prompt_prefix, args.prompt_postfix, device)
 
-    train(model, normal_loader, anomaly_loader, test_loader, args, LABEL_MAP, device)
+    train(model, normal_loader, anomaly_loader, test_loader, args, label_map, device)

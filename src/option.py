@@ -31,8 +31,3 @@ parser.add_argument('--gt-path', default='list/gt_ucf.npy')
 parser.add_argument('--gt-segment-path', default='list/gt_segment_ucf.npy')
 parser.add_argument('--gt-label-path', default='list/gt_label_ucf.npy')
 
-# HIVAU supervision
-parser.add_argument('--hivau-json', default='/home/emogenai4e/emo/VHung/HIVAU-70k-NEW/ucf_database_train.json')
-parser.add_argument('--lambda-sup', default=0.1, type=float)
-parser.add_argument('--focal-alpha', default=0.75, type=float)
-parser.add_argument('--focal-gamma', default=2.0, type=float)

@@ -157,8 +157,8 @@ def make_gt_segment(test_csv, annotation_txt, segment_path, label_path):
 if __name__ == '__main__':
     # ===== CONFIG: sửa đường dẫn ở đây =====
     FEATURE_ROOT = '/home/emogenai4e/emo/VHung/UCFClipFeatures'
-    DATA_DIR = '../data'
-    LIST_DIR = 'list'
+    DATA_DIR = '/home/emogenai4e/emo/VHung/data'
+    LIST_DIR = '/home/emogenai4e/emo/VHung/list'
     # =========================================
 
     os.makedirs(LIST_DIR, exist_ok=True)

@@ -457,6 +457,26 @@
       "An anomaly exists, specifically identified as Physical Abuse. The anomaly event involves a woman being subdued by multiple individuals, including a man and another woman, after initially being dragged by a yellow-haired woman, indicating a potentially violent and coercive interaction. The basis for judging this anomaly is the observation of physical restraint and potential use of force, which deviates from normal and respectful human interactions."
     ]
   },
+  "Abuse024_x264": {
+    "n_frames": 1021,
+    "fps": 30.0,
+    "label": [
+      "Abuse"
+    ],
+    "events": [
+      [
+        19.0,
+        24.0
+      ],
+      [
+        25.0,
+        33.5
+      ]
+    ],
+    "events_summary": [
+      "Fixed",
+      "Fixed"    ]
+  },
   "Abuse025_x264": {
     "n_frames": 2031,
     "fps": 30.0,
@@ -524,6 +544,28 @@
     ],
     "events_summary": [
       "There exists an anomaly, specifically Potential Animal Abuse. The anomaly event involves holding the dog forward and looking back, which raises concerns about the dog's welfare and potential mistreatment. The basis for judging this anomaly is the unusual and potentially harmful handling of the dog, deviating from standard and humane animal care practices."
+    ]
+  },
+  "Abuse031_x264": {
+    "n_frames": 4442,
+    "fps": 30.0,
+    "label": [
+      "Abuse"
+    ],
+    "events": [
+      [
+        19.0,
+        26.0
+      ],
+      [
+        57.0,
+        77.0
+      ]
+    ],
+    "events_summary": [
+      "Fixed",
+      "Fixed"
+
     ]
   },
   "Abuse032_x264": {
@@ -642,6 +684,22 @@
       "An anomaly exists, specifically an \"Animal Abuse\" anomaly. The anomaly event involves a white car slowly appearing on the screen and crushing a black dog walking in the middle of the road. The basis for judging this anomaly is that the event depicts harm or cruelty towards an animal, which is a clear violation of animal welfare and ethical standards."
     ]
   },
+  "Abuse038_x264": {
+    "n_frames": 891,
+    "fps": 30.0,
+    "label": [
+      "Abuse"
+    ],
+    "events": [
+      [
+        8.0,
+        12.0
+      ]
+    ],
+    "events_summary": [
+      "Fixed"
+    ]
+  },
   "Abuse039_x264": {
     "n_frames": 14144,
     "fps": 30.0,
@@ -672,6 +730,27 @@
     ],
     "events_summary": [
       "An anomaly exists, specifically Physical Abuse. The anomaly events involve the woman in blue slapping the white-haired woman multiple times, first with two slaps inside the room and again after they exit the room. The basis for judging this anomaly is the intentional and harmful physical contact exhibited by the woman in blue towards the white-haired woman, which deviates from normal and respectful human behavior."
+    ]
+  },
+  "Abuse041_x264": {
+    "n_frames": 1385,
+    "fps": 30.0,
+    "label": [
+      "Abuse"
+    ],
+    "events": [
+      [
+        3.0,
+        7.0
+      ],
+      [
+        31.0,
+        33.0
+      ]
+    ],
+    "events_summary": [
+      "Fixed",
+      "Fixed"
     ]
   },
   "Abuse042_x264": {
@@ -2345,6 +2424,27 @@
       "The anomaly exists and its specific name is Arson. The anomaly event involves two people throwing burning torches at a house, which is a deliberate and intentional act of setting fire to a property, posing a significant threat to people's lives and safety. The basis for judging this anomaly is the clear and intentional act of setting fire to a property, which deviates from normal and acceptable human behavior.",
       "The anomaly exists and the specific name of the anomaly is Arson. The anomaly event involves two individuals intentionally throwing burning torches at a house, which is a dangerous and illegal act that can cause harm to people and property. The basis for judging this anomaly is the intentional and reckless behavior of the individuals, which deviates from normal and safe behavior, and is a criminal offense.",
       "The anomaly exists and is specifically identified as \"Arson\". The anomaly event involves a man in white getting out of a car, setting it on fire, and then leaving the scene. The basis for judging this anomaly is the intentional and illegal act of setting a vehicle on fire, which is a criminal offense and a serious safety hazard."
+    ]
+  },
+  "Arson034_x264": {
+    "n_frames": 2388,
+    "fps": 30.0,
+    "label": [
+      "Arson"
+    ],
+    "events": [
+      [
+        14.0,
+        0.23
+      ],
+      [
+        38.0,
+        50.0
+      ]
+    ],
+    "events_summary": [
+      "Fixed",
+      "Fixed"
     ]
   },
   "Arson036_x264": {
@@ -6772,6 +6872,22 @@
       "The anomaly exists and the specific name of the anomaly is \"Fighting\". The anomaly event involves a man with a gun being knocked down, and then another man stopping on a motorcycle, suggesting a physical altercation or violent incident. The basis for judging the anomaly is the sudden and intense physical interaction between individuals, which deviates from normal, peaceful human behavior."
     ]
   },
+  "Fighting041_x264": {
+    "n_frames": 2329,
+    "fps": 30.0,
+    "label": [
+      "Fighting"
+    ],
+    "events": [
+      [
+        617.0,
+        637.0
+      ]
+    ],
+    "events_summary": [
+      "Fixed"
+    ]
+  },
   "Fighting043_x264": {
     "n_frames": 3143,
     "fps": 30.0,
@@ -7303,6 +7419,22 @@
       [
         10.0,
         75.0
+      ]
+    ],
+    "events_summary": [
+      "Fixed"
+    ]
+  },
+  "RoadAccidents033_x264": {
+    "n_frames": 587,
+    "fps": 30.0,
+    "label": [
+      "RoadAccidents"
+    ],
+    "events": [
+      [
+       8.0,
+       12.0
       ]
     ],
     "events_summary": [
@@ -8810,6 +8942,22 @@
     "events_summary": [
       "The anomaly exists and the specific name of the anomaly is RoadAccidents. The anomaly event is a motorcycle carrying two people being hit by a truck, resulting in the motorcycle and the person in front being knocked away. The basis for judging the anomaly is the sudden and unexpected collision between the motorcycle and the truck, deviating from the normal flow of traffic.",
       "An anomaly exists, specifically a RoadAccident. The anomaly event involves many people walking towards the place where the accident occurred, indicating that an incident has taken place and people are gathering to observe or assist. The basis for judging this anomaly is the unusual and sudden convergence of people towards a specific location, deviating from the normal flow of pedestrian traffic."
+    ]
+  },
+  "RoadAccidents118_x264": {
+    "n_frames": 968,
+    "fps": 30.0,
+    "label": [
+      "RoadAccidents"
+    ],
+    "events": [
+      [
+        5.0,
+        10.0
+      ]
+    ],
+    "events_summary": [
+      "Fixed"
     ]
   },
   "RoadAccidents119_x264": {
@@ -12818,6 +12966,23 @@
       "Based on the provided caption, it appears that an anomaly exists, specifically shoplifting. The anomaly event is not explicitly described in the caption, but it is hinted at as a possible occurrence. The basis for judging the anomaly is the unusual behavior of the individuals, particularly the woman with white hair, who may be packing clothes in a suspicious manner."
     ]
   },
+  "Shoplifting014_x264": {
+    "n_frames": 66698,
+    "fps": 30.0,
+    "label": [
+      "Shoplifting"
+    ],
+    "events": [
+      [
+        1135.0,
+        1140.0
+      ]
+    ],
+    "events_summary": [
+      "There is a suspected anomaly, specifically shoplifting. The anomaly event involves the woman with yellow hair potentially concealing an item of clothing while walking to the corner of the store, raising suspicion of theft. The basis for judging this anomaly is the unusual and covert behavior of the woman with yellow hair, which deviates from the expected norm of browsing and purchasing clothes in a store.",
+      "Based on the provided caption, it appears that an anomaly exists, specifically shoplifting. The anomaly event is not explicitly described in the caption, but it is hinted at as a possible occurrence. The basis for judging the anomaly is the unusual behavior of the individuals, particularly the woman with white hair, who may be packing clothes in a suspicious manner."
+    ]
+  },
   "Shoplifting018_x264": {
     "n_frames": 2132,
     "fps": 30.0,
@@ -13396,6 +13561,22 @@
     "events_summary": [
       "There is an anomaly, specifically a \"Possible Theft\" anomaly. The anomaly event involves a man in a floral shirt passing by the white car, which may be suspicious behavior. The basis for judging this anomaly is that the man's actions seem out of place and unrelated to the other events in the video, suggesting potential malicious intent.",
       "The anomaly exists, and its specific name is the \"Object Permanence Anomaly\". The anomaly events involve the man in white stealing objects, which is an unexpected and unexplained occurrence in the video. The basis for judging this anomaly is that the man's actions defy the normal laws of physics and object permanence, as objects should not disappear or be manipulated in such a manner without any logical explanation."
+    ]
+  },
+  "Stealing011_x264": {
+    "n_frames": 3717,
+    "fps": 30.0,
+    "label": [
+      "Stealing"
+    ],
+    "events": [
+      [
+        66.0,
+        120.0
+      ]
+    ],
+    "events_summary": [
+      "Fixed"
     ]
   },
   "Stealing012_x264": {
@@ -14134,6 +14315,27 @@
       "The anomaly exists, specifically identified as \"Stealing\". The anomaly event involves the child walking to the counter and looking in the drawer, suggesting potential unauthorized access or removal of items. The basis for judging this anomaly is the unusual and suspicious behavior of the child, deviating from the expected norm of a child's actions in a store or retail setting."
     ]
   },
+  "Stealing057_x264": {
+    "n_frames": 3015,
+    "fps": 30.0,
+    "label": [
+      "Stealing"
+    ],
+    "events": [
+      [
+          28.0,
+          45.0
+      ],
+      [
+          79.0,
+          96.0
+      ]
+  ],
+    "events_summary": [
+      "Fixed",
+      "Fixed"
+    ]
+  },
   "Stealing059_x264": {
     "n_frames": 2233,
     "fps": 30.0,
@@ -14585,6 +14787,22 @@
       "The anomaly exists and is specifically identified as \"Stealing\". The anomaly event involves the three men in blue tinkering with white objects, which may imply unauthorized or suspicious activity with the objects. The basis for judging this anomaly is the unusual and potentially malicious behavior of the individuals handling the objects, deviating from expected norms."
     ]
   },
+  "Stealing086_x264": {
+    "n_frames": 18146,
+    "fps": 30.0,
+    "label": [
+      "Stealing"
+    ],
+    "events": [
+      [
+        408.0,
+        418.0
+      ]
+    ],
+    "events_summary": [
+      "Fixed"
+    ]
+  },
   "Stealing087_x264": {
     "n_frames": 4938,
     "fps": 30.0,
@@ -14748,6 +14966,22 @@
       "The anomaly exists and is specifically identified as \"Potential Theft or Unauthorized Access\". The anomaly event involves the man in the hat looking inside the car with a flashlight, suggesting suspicious behavior that may be indicative of theft or unauthorized access. The basis for judging this anomaly is the unusual and secretive manner in which the individual is interacting with the vehicle, which deviates from normal and expected behavior.",
       "The anomaly exists, specifically, it is a \"Theft\" anomaly. The anomaly event involves the man in the hat walking to another car and looking in from the front window with a flashlight, suggesting suspicious behavior that may be indicative of stealing. The basis for judging the anomaly is the unusual and secretive behavior of the man in the hat, which deviates from normal and expected actions in a public setting.",
       "The anomaly exists, specifically identified as \"Stealing\". The anomaly event involves the man in the hat putting his head completely into the car window, which is an unusual and suspicious behavior, potentially indicative of theft or other malicious activity. The basis for judging this anomaly is the unexpected and out-of-place nature of the man's action, deviating from typical human behavior in a public setting."
+    ]
+  },
+  "Stealing093_x264": {
+    "n_frames": 1229,
+    "fps": 30.0,
+    "label": [
+      "Stealing"
+    ],
+    "events": [
+      [
+        18.0,
+        37.0
+      ]
+    ],
+    "events_summary": [
+      "Fixed"
     ]
   },
   "Stealing094_x264": {
@@ -15477,6 +15711,22 @@
       "An anomaly exists, specifically Vandalism. The anomaly event involves a man wearing a hat kicking a large flower pot next to him, causing it to fall to the ground and break into pieces. The basis for judging this anomaly is the intentional destruction of property, which is a characteristic behavior of vandalism."
     ]
   },
+  "Vandalism021_x264": {
+    "n_frames": 1362,
+    "fps": 30.0,
+    "label": [
+      "Vandalism"
+    ],
+    "events": [
+      [
+        2.0,
+        27.0
+      ]
+    ],
+    "events_summary": [
+      "Fixed"
+    ]
+  },
   "Vandalism022_x264": {
     "n_frames": 3932,
     "fps": 30.0,
@@ -15807,6 +16057,27 @@
     "events_summary": [
       "There is an anomaly, specifically Vandalism, which is summarized as two men in black wearing hats and a man in black without a hat walking into the room, walking around, and then leaving, indicating potential malicious or destructive behavior. The basis for judging this anomaly is the unusual and suspicious nature of their actions, which deviates from normal behavior in the given context.",
       "There is an anomaly, specifically Vandalism, which involves the two men in black wearing hats and the man in black without a hat walking into the room, moving around, and then leaving, suggesting intentional and potentially destructive behavior. The anomaly event is characterized by the unusual and suspicious movement of the individuals in the room. The basis for judging this anomaly is the deviation from normal and expected behavior in the given environment, which raises concerns about potential malicious activity."
+    ]
+  },
+  "Vandalism041_x264": {
+    "n_frames": 1037,
+    "fps": 30.0,
+    "label": [
+      "Vandalism"
+    ],
+    "events": [
+      [
+        17.0,
+        54.0
+      ],
+      [
+        100.0,
+        115.0
+      ]
+    ],
+    "events_summary": [
+      "Fixed",
+      "Fixed"
     ]
   },
   "Vandalism042_x264": {

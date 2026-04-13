@@ -146,8 +146,61 @@ Simulation: temp=0.1 → normal=0.198, anomaly=0.913, gap=0.714
 | AUC1 giảm nhẹ (<0.5%) nhưng AUC3 tăng | Proceed, rely on ensemble |
 | AUC1 giảm >1% | Dừng, quay lại detach |
 
+### Kết quả (Epoch 1-2, ongoing)
+
+| Metric | Epoch 1 best | Epoch 2 (step 5120) |
+|---|---|---|
+| AUC1 | **0.8636** | 0.8552 |
+| AUC3 | 0.8510 | 0.8426 |
+| anomaly_mean | 0.302 | — |
+| normal_mean | 0.168 | — |
+| gap | 0.134 | — |
+| coverage | 7.8% | — |
+
+### Analysis (sau 2 epochs)
+
+1. **AUC1 giữ nguyên**: 0.8636 vs Phase A 0.8630 → **no-detach an toàn**, gradient conflict không đáng kể
+2. **AUC3 khởi đầu tốt hơn**: 0.8510 tại Epoch 1 (Phase A cần 3 epochs mới đạt 0.8593)
+3. **Map quality vẫn kém**: anomaly=0.302, coverage=7.8% — gần như giống Phase A
+4. **Kết luận**: No-detach alone chỉ cải thiện AUC, KHÔNG fix calibration. Cần thêm Coverage + Ranking losses
+
+---
+
+## Experiment 4: No Detach + Coverage + Ranking (CHUẨN BỊ)
+
+**Branch:** `dev_logits3`
+**Ngày:** 2026-04-14
+
+### Config
+- Architecture: `logits3 = map_head(visual_features)` — **KHÔNG detach**
+- Losses: BCE + Smoothness + Coverage + Ranking (all 4 losses)
+- `lambda_bce=1.0, lambda_smooth=0.1, lambda_coverage=1.0, lambda_ranking=1.0`
+- `coverage_threshold=0.5, ranking_margin=0.3`
+- Gradient từ ALL losses chảy ngược qua GCN/Transformer
+
+### Hypothesis
+- No-detach + Coverage/Ranking = Phase B coverage gains + better features
+- Phase B (detach) đạt coverage 59.4% nhưng bị ceiling do detach. No-detach có thể vượt qua
+- Ranking loss hiệu quả hơn khi features có thể adapt
+
 ### Kết quả
-*(chờ training hoàn thành)*
+*(chờ training)*
+
+---
+
+## Experiment 5: Platt Scaling (CHUẨN BỊ)
+
+**Script:** `src/platt_scaling.py`
+**Ngày:** 2026-04-14
+
+### Config
+- Input: Checkpoint từ Exp 3 hoặc Exp 4
+- Method: Grid search temperature + bias trên raw logits3
+- `calibrated = sigmoid((raw - bias) / temp)`
+- Không retrain, chỉ post-hoc calibration
+
+### Kết quả
+*(chờ checkpoint)*
 
 ---
 
@@ -155,6 +208,5 @@ Simulation: temp=0.1 → normal=0.198, anomaly=0.913, gap=0.714
 
 | # | Experiment | Mô tả | Depends on |
 |---|---|---|---|
-| 4 | Platt scaling | Fit temperature + bias trên logits3 raw logits | Exp 3 checkpoint |
-| 5 | Ensemble tuning | Grid search α trong `α*p1 + (1-α)*p3` | Exp 3 checkpoint |
-| 6 | Phase C ensemble eval | Report AUC ensemble > 88.01? | Exp 4 + 5 |
+| 6 | Ensemble tuning | Grid search α trong `α*p1 + (1-α)*p3` | Exp 4/5 checkpoint |
+| 7 | Full pipeline eval | AUC ensemble > 88.01? Map quality OK? | Exp 5 + 6 |

@@ -31,3 +31,10 @@ parser.add_argument('--gt-path', default='list/gt_ucf.npy')
 parser.add_argument('--gt-segment-path', default='list/gt_segment_ucf.npy')
 parser.add_argument('--gt-label-path', default='list/gt_label_ucf.npy')
 
+# logits3 anomaly map head
+parser.add_argument('--hivau-json-path', default='HIVAU-70k-NEW/ucf_database_train_filtered.json')
+parser.add_argument('--lambda-bce', default=1.0, type=float)
+parser.add_argument('--lambda-smooth', default=0.1, type=float)
+parser.add_argument('--log-dir', default='logs')
+parser.add_argument('--smooth-sigma', default=1.5, type=float)
+

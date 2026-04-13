@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -20,15 +21,18 @@ LABEL_MAP = {
 }
 
 
-def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, device):
+def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels,
+         device, logger=None):
     model.to(device)
     model.eval()
 
     element_logits2_stack = []
+    score_maps = {}
 
     with torch.no_grad():
         for i, item in enumerate(tqdm(testdataloader, desc='Testing')):
             visual = item[0].squeeze(0)
+            label = item[1][0]
             length = int(item[2])
             len_cur = length
 
@@ -51,43 +55,62 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, d
             lengths = lengths.to(int)
             padding_mask = get_batch_mask(lengths, maxlen).to(device)
 
-            _, logits1, logits2 = model(visual, padding_mask, prompt_text, lengths)
+            _, logits1, logits2, logits3 = model(visual, padding_mask, prompt_text, lengths)
             logits1 = logits1.reshape(logits1.shape[0] * logits1.shape[1], logits1.shape[2])
             logits2 = logits2.reshape(logits2.shape[0] * logits2.shape[1], logits2.shape[2])
+            logits3 = logits3.reshape(logits3.shape[0] * logits3.shape[1], logits3.shape[2])
+
             prob2 = (1 - logits2[0:len_cur].softmax(dim=-1)[:, 0].squeeze(-1))
             prob1 = torch.sigmoid(logits1[0:len_cur].squeeze(-1))
+            prob3 = torch.sigmoid(logits3[0:len_cur].squeeze(-1))
 
             if i == 0:
                 ap1 = prob1
                 ap2 = prob2
+                ap3 = prob3
             else:
                 ap1 = torch.cat([ap1, prob1], dim=0)
                 ap2 = torch.cat([ap2, prob2], dim=0)
+                ap3 = torch.cat([ap3, prob3], dim=0)
 
             element_logits2 = logits2[0:len_cur].softmax(dim=-1).detach().cpu().numpy()
             element_logits2 = np.repeat(element_logits2, 16, 0)
             element_logits2_stack.append(element_logits2)
 
+            score_map_np = np.repeat(prob3.cpu().numpy(), 16)
+            score_maps[f"video_{i:04d}_{label}"] = score_map_np
+
     ap1 = ap1.cpu().numpy().tolist()
     ap2 = ap2.cpu().numpy().tolist()
+    ap3 = ap3.cpu().numpy().tolist()
 
     ROC1 = roc_auc_score(gt, np.repeat(ap1, 16))
     AP1 = average_precision_score(gt, np.repeat(ap1, 16))
     ROC2 = roc_auc_score(gt, np.repeat(ap2, 16))
     AP2 = average_precision_score(gt, np.repeat(ap2, 16))
+    ROC3 = roc_auc_score(gt, np.repeat(ap3, 16))
+    AP3 = average_precision_score(gt, np.repeat(ap3, 16))
 
-    print("AUC1: ", ROC1, " AP1: ", AP1)
-    print("AUC2: ", ROC2, " AP2:", AP2)
+    print(f"  AUC1: {ROC1:.4f}  AP1: {AP1:.4f}  (logits1 - baseline)")
+    print(f"  AUC3: {ROC3:.4f}  AP3: {AP3:.4f}  (logits3 - map head)")
+    print(f"  AUC2: {ROC2:.4f}  AP2: {AP2:.4f}  (logits2 - text align)")
 
     dmap, iou = dmAP(element_logits2_stack, gtsegments, gtlabels, excludeNormal=False)
     averageMAP = 0
-    for i in range(5):
-        print('mAP@{0:.1f} ={1:.2f}%'.format(iou[i], dmap[i]))
-        averageMAP += dmap[i]
-    averageMAP = averageMAP / (i + 1)
-    print('average MAP: {:.2f}'.format(averageMAP))
+    for k in range(5):
+        print('  mAP@{0:.1f} ={1:.2f}%'.format(iou[k], dmap[k]))
+        averageMAP += dmap[k]
+    averageMAP = averageMAP / 5
+    print('  average MAP: {:.2f}'.format(averageMAP))
 
-    return ROC1, AP1
+    if logger:
+        logger.info(
+            f"[Eval] AUC1={ROC1:.4f} AP1={AP1:.4f} | "
+            f"AUC3={ROC3:.4f} AP3={AP3:.4f} | "
+            f"AUC2={ROC2:.4f} AP2={AP2:.4f} | "
+            f"avgMAP={averageMAP:.2f}")
+
+    return ROC1, AP1, ROC3, AP3, score_maps
 
 
 if __name__ == '__main__':
@@ -107,4 +130,19 @@ if __name__ == '__main__':
                     args.prompt_prefix, args.prompt_postfix, device)
     model.load_state_dict(torch.load(args.model_path, weights_only=False))
 
-    test(model, testdataloader, args.visual_length, prompt_text, gt, gtsegments, gtlabels, device)
+    import logging
+    logger = logging.getLogger('logits3')
+    if not logger.handlers:
+        os.makedirs(args.log_dir, exist_ok=True)
+        fh = logging.FileHandler(os.path.join(args.log_dir, 'train.log'), mode='a')
+        fh.setFormatter(logging.Formatter('[%(asctime)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+        logger.addHandler(fh)
+        logger.setLevel(logging.INFO)
+
+    _, _, _, _, score_maps = test(model, testdataloader, args.visual_length, prompt_text,
+                                  gt, gtsegments, gtlabels, device, logger)
+
+    maps_dir = os.path.join(args.log_dir, 'score_maps')
+    os.makedirs(maps_dir, exist_ok=True)
+    for name, smap in score_maps.items():
+        np.save(os.path.join(maps_dir, f"{name}.npy"), smap)

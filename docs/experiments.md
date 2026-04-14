@@ -13,6 +13,17 @@ Thêm anomaly map head (logits3) vào VadCLIP để sinh anomaly score map chấ
 
 ---
 
+## Hard Constraints (fixed, không bàn lại)
+
+Xác lập ngày 2026-04-14 sau Experiment 5:
+
+1. **Không thể thay đổi env**. CUDA/PyTorch/cuDNN numerics của máy này là cố định. Env đồng nghiệp reproduce được 0.8801 nhưng env này chỉ đạt 0.8736 trên cùng pretrained → gap ~0.65pp là env numerics, không phải method.
+2. Không thể train lại baseline để cố reproduce, kết quả không khác đâu.
+3. 
+Mọi experiment tiếp theo phải thỏa các ràng buộc trên.
+
+---
+
 ## Experiment 1: Phase A — Detached + BCE + Smoothness
 
 **Branch:** `dev_logits3` (cũ, đã xóa)
@@ -121,14 +132,15 @@ Simulation: temp=0.1 → normal=0.198, anomaly=0.913, gap=0.714
 
 ---
 
-## Experiment 3: No Detach — gradient flows back (ĐANG CHẠY)
+## Experiment 3: No Detach — gradient flows back
 
-**Branch:** `dev_logits3` (hiện tại)
+**Branch:** `dev_logits3`
 **Ngày:** 2026-04-14
+**Status:** Crashed tại Epoch 4 (OOM/IO error), checkpoint saved tại Epoch 2
 
 ### Config
 - Architecture: `logits3 = map_head(visual_features)` — **KHÔNG detach**
-- Losses: BCE + Smoothness (Phase A losses, đơn giản)
+- Losses: BCE + Smoothness (2 losses đơn giản)
 - `lambda_bce=1.0, lambda_smooth=0.1`
 - Gradient từ logits3 losses chảy ngược qua GCN/Transformer
 
@@ -138,38 +150,40 @@ Simulation: temp=0.1 → normal=0.198, anomaly=0.913, gap=0.714
 - AUC có thể tăng (hoặc ít nhất giữ nguyên)
 - Post-training: Platt scaling để calibrate absolute scores
 
-### Tiêu chí đánh giá (sau 2 epochs)
+### Kết quả (checkpoint Epoch 2)
 
-| Kết quả | Hành động |
+| Metric | Value |
 |---|---|
-| AUC1 ≥ 0.86 | Proceed, chạy full 10 epochs |
-| AUC1 giảm nhẹ (<0.5%) nhưng AUC3 tăng | Proceed, rely on ensemble |
-| AUC1 giảm >1% | Dừng, quay lại detach |
+| Best AUC1 | **0.8684** |
+| Best AUC3 | 0.8510 |
+| anomaly_mean | 0.352 (uncalibrated) |
+| normal_mean | 0.154 (uncalibrated) |
+| gap | 0.198 |
+| coverage | 16.1% |
 
-### Kết quả (Epoch 1-2, ongoing)
+### Platt Scaling Analysis
 
-| Metric | Epoch 1 best | Epoch 2 (step 5120) |
-|---|---|---|
-| AUC1 | **0.8636** | 0.8552 |
-| AUC3 | 0.8510 | 0.8426 |
-| anomaly_mean | 0.302 | — |
-| normal_mean | 0.168 | — |
-| gap | 0.134 | — |
-| coverage | 7.8% | — |
+Raw logits3: mean=-1.963, std=1.081, range [-4.733, 1.185]
 
-### Analysis (sau 2 epochs)
+**Balanced MLE Platt** (`class_weight='balanced'`):
+- Temperature: 0.62, Bias: 0.35
+- Normal: 0.057, Anomaly: 0.206, Gap: 0.149, Coverage: 3.8%
+- → Platt kéo ANOMALY xuống do raw logit gap nhỏ
 
-1. **AUC1 giữ nguyên**: 0.8636 vs Phase A 0.8630 → **no-detach an toàn**, gradient conflict không đáng kể
-2. **AUC3 khởi đầu tốt hơn**: 0.8510 tại Epoch 1 (Phase A cần 3 epochs mới đạt 0.8593)
-3. **Map quality vẫn kém**: anomaly=0.302, coverage=7.8% — gần như giống Phase A
-4. **Kết luận**: No-detach alone chỉ cải thiện AUC, KHÔNG fix calibration. Cần thêm Coverage + Ranking losses
+### Analysis
+
+1. **AUC1 = 0.8684**: best so far across all experiments, nhưng vẫn **dưới baseline 0.8801 (-1.17%)**
+2. **Map quality kém**: Coverage chỉ 16.1%, anomaly_mean 0.35 — không đạt "anomaly~1"
+3. **Platt scaling không fix được**: Raw logits gap quá nhỏ (1.2 points), Platt chỉ trade-off được anomaly xuống hoặc normal lên
+4. **Kết luận**: BCE+Smooth alone không đủ mạnh để đẩy raw logits ra biên. Cần thêm Coverage + Ranking
 
 ---
 
-## Experiment 4: No Detach + Coverage + Ranking (CHUẨN BỊ)
+## Experiment 4: No Detach + Coverage + Ranking
 
 **Branch:** `dev_logits3`
 **Ngày:** 2026-04-14
+**Status:** Completed full 10 epochs
 
 ### Config
 - Architecture: `logits3 = map_head(visual_features)` — **KHÔNG detach**
@@ -183,30 +197,166 @@ Simulation: temp=0.1 → normal=0.198, anomaly=0.913, gap=0.714
 - Phase B (detach) đạt coverage 59.4% nhưng bị ceiling do detach. No-detach có thể vượt qua
 - Ranking loss hiệu quả hơn khi features có thể adapt
 
-### Kết quả
-*(chờ training)*
+### Kết quả (10 epochs, best AUC1 tại Epoch 3)
+
+| Metric | Epoch 1 | Epoch 3 (best) | Epoch 10 (final) |
+|---|---|---|---|
+| AUC1 | 0.8520 | **0.8653** | 0.8634 |
+| AUC3 | 0.8515 | 0.8602 | 0.8581 |
+| anomaly_mean | 0.492 | ~0.51 | 0.519 |
+| normal_mean | 0.270 | ~0.24 | 0.235 |
+| gap | 0.222 | ~0.28 | 0.283 |
+| coverage | 52.4% | ~60% | **62.2%** |
+
+### Loss Trends (Epoch 10)
+
+| Loss | Value | Trend |
+|---|---|---|
+| loss1 (MIL BCE) | 0.055 | Dropping steady |
+| loss2 (classification) | 0.82 | Dropping steady |
+| L_bce | 0.43 | Plateau early |
+| L_smooth | 0.01 | Converged |
+| L_cov | 0.03 | Plateau early |
+| L_rank | 0.29 | **Barely moving** (~0.32 → 0.29) |
+
+### Platt Scaling Analysis
+
+Raw logits3: mean=-1.522, std=1.284, range [-5.380, 1.689]
+
+**Uncalibrated (best map quality without post-hoc):**
+- Normal: 0.225, Anomaly: 0.478, Gap: 0.253, Coverage: 55.5%
+
+**Balanced MLE Platt** (`class_weight='balanced'`):
+- Temperature: 0.63, Bias: -0.69
+- Normal: 0.304, Anomaly: 0.696, Gap: 0.392, Coverage: **85.4%**
+- → Calibration cải thiện rõ rệt, anomaly peak gần đạt target
+
+**Unbalanced MLE Platt** (baseline comparison):
+- Temperature: 0.61, Bias: 0.90
+- Normal: 0.058, Anomaly: 0.194 (too low!), Gap: 0.135, Coverage: 0.5%
+- → Class imbalance (85% normal frames) kéo anomaly xuống
+
+### Analysis
+
+**Map quality: CẢI THIỆN RÕ RỆT**
+1. Coverage 62% (raw) → 85% (balanced Platt) — plateau behavior đạt được
+2. Gap 0.28 → 0.39 — phân biệt tốt hơn
+3. Anomaly mean 0.48 → 0.70 (balanced Platt) — gần target ~1
+
+**AUC: VẪN KHÔNG ĐỦ**
+1. Best AUC1 = 0.8653 — **dưới baseline 0.8801 (-1.48%)**
+2. AUC3 = 0.8604 < AUC1 (ranking logits1 tốt hơn logits3)
+3. AUC1 plateau tại Epoch 3, sau đó dao động 0.86-0.865 — không cải thiện thêm
+
+**Gradient balance (root cause):**
+```
+Total loss breakdown (Epoch 10):
+  loss1 + loss2 + loss3 = 0.055 + 0.816 + 0.016 = 0.887 (original VadCLIP)
+  λ_bce*L_bce + λ_smooth*L_smooth + λ_cov*L_cov + λ_rank*L_rank
+    = 0.43 + 0.001 + 0.03 + 0.29 = 0.760 (map losses)
+
+→ Map losses chiếm ~46% tổng gradient budget
+→ Shared features bị kéo ~một nửa về hướng phục vụ logits3
+→ Hại cho logits1 AUC
+```
+
+**Kết luận:**
+- Approach này đạt được **map quality tốt** sau Platt scaling (Coverage 85%, Gap 0.39)
+- Nhưng **AUC trả giá**: -1.48% so với baseline do gradient interference
+- Trade-off này không chấp nhận được nếu muốn AUC ≥ 0.8801
 
 ---
 
-## Experiment 5: Platt Scaling (CHUẨN BỊ)
+## Experiment 5: Re-baselining + Inference-time tricks
 
-**Script:** `src/platt_scaling.py`
+**Branch:** `dev_logits3`
 **Ngày:** 2026-04-14
+**Status:** Completed (3 sub-experiments diagnostic, không train)
 
-### Config
-- Input: Checkpoint từ Exp 3 hoặc Exp 4
-- Method: Grid search temperature + bias trên raw logits3
-- `calibrated = sigmoid((raw - bias) / temp)`
-- Không retrain, chỉ post-hoc calibration
+### Motivation
 
-### Kết quả
-*(chờ checkpoint)*
+Trước khi đi tiếp (ban đầu định làm Two-Stage Training), cần verify 3 câu hỏi chưa được answer:
+
+1. Ensemble `α·p1 + (1−α)·p3` trên Exp 4 có vượt 0.8801 không?
+2. Original VadCLIP (`model_ucf.pth`) ở env này thực tế đạt AUC bao nhiêu + map quality ra sao?
+3. Có đẩy AUC vượt 0.8801 bằng inference-time tricks không (không train)?
+
+### Sub-exp 5.1: Ensemble evaluation on Exp 4 checkpoint
+
+Script: `python src/ensemble_eval.py --checkpoint-path final_model/checkpoint_exp4.pth --use-platt`
+
+Grid search α ∈ [0.0, 1.0] step 0.05 trên `α·p1 + (1−α)·p3_calibrated`:
+
+| Variant | AUC | Gap | Coverage | Anom mean | Norm mean |
+|---|---|---|---|---|---|
+| p1 raw | 0.8653 | 0.548 | 85.7% | 0.830 | 0.282 |
+| p3 raw | 0.8602 | 0.253 | 55.5% | 0.478 | 0.225 |
+| p3 Platt balanced | 0.8602 | 0.392 | 85.4% | 0.696 | 0.304 |
+| Best ensemble | 0.8653 (α=**1.00**) | — | — | — | — |
+
+**Findings**:
+- Ensemble optimum là α=1.0 → p3 **không đóng góp signal** gì so với p1.
+- p1 raw (Gap 0.548, Cov 85.7%) **tốt hơn** p3 đã calibrate (Gap 0.392, Cov 85.4%).
+- Logits3 head và Platt scaling đều **không cần thiết**.
+
+### Sub-exp 5.2: Original VadCLIP eval
+
+Script: `python src/ensemble_eval.py --checkpoint-path model/model_ucf.pth` (load raw state_dict, `strict=False` cho map_head).
+
+Results:
+
+| Metric | Original (`model_ucf.pth`) | Exp 4 (trained) | Delta |
+|---|---|---|---|
+| AUC1 | **0.8736** | 0.8653 | −0.83pp |
+| Map Gap | **0.572** | 0.548 | −0.024 |
+| Coverage | **89.2%** | 85.7% | −3.5pp |
+| Anomaly mean | **0.872** | 0.830 | −0.042 |
+| Normal mean | 0.300 | 0.282 | — |
+
+**Critical findings**:
+1. Env baseline thực tế = **0.8736**, không phải 0.8801 paper. Gap môi trường **+0.65pp**.
+2. Exp 4 training đã **làm hại** mọi metric so với original pretrained: AUC thấp hơn, map quality kém hơn.
+3. Original VadCLIP p1 raw **đã đạt objective map quality** (Gap 0.57, Cov 89%) — không cần logits3 head.
+4. Kết hợp với 5.1 → toàn bộ approach logits3 + map losses là **dead end**.
+
+### Sub-exp 5.3: Temporal smoothing + TTA trên original
+
+Script mới `src/tta_smooth_eval.py`. Apply Gaussian smoothing clip-level p1 và test-time augmentation (Gaussian noise trên visual features).
+
+Config: σ ∈ {0, 1, 2, 3, 5}, TTA K=5, noise std=0.03.
+
+Results (`model_ucf.pth`):
+
+| Variant | AUC1 | Δ vs baseline |
+|---|---|---|
+| clean, σ=0 (baseline) | 0.8736 | — |
+| clean, σ=1 | 0.8736 | 0.0000 |
+| clean, σ=2 | 0.8734 | −0.0002 |
+| clean, σ=3 | 0.8730 | −0.0006 |
+| clean, σ=5 | 0.8718 | −0.0018 |
+| TTA K=5, σ=0 | 0.8737 | +0.0001 |
+| TTA K=5, σ=2 | 0.8734 | −0.0002 |
+| Best overall | **0.8737** | **+0.0001** |
+
+**Findings**:
+- Smoothing σ>0: slightly **hurt** (p1 đã temporally coherent, smoothing làm leak scores qua boundaries).
+- TTA noise=0.03: gain +0.0001 (noise level). Model robust với perturbation nhỏ này.
+- **Total gain: +0.0001pp**, cần +0.65pp → inference tricks không đủ xa.
+
+### Kết luận Experiment 5
+
+1. **Logits3 head approach = dead end** (xác nhận bằng 5.1, 5.2).
+2. **Map quality = solved problem**. Original p1 raw đủ dùng cho downstream (Gap 0.57, Cov 89%).
+3. **Vấn đề duy nhất là AUC gap 0.65pp**, và gap này là **env numerics**, không phải method.
+4. **Inference tricks rẻ (TTA/smooth) đã thử và thất bại** (+0.0001pp).
+5. Mọi experiment tiếp theo phải làm việc với baseline 0.8736 cố định trên env này (xem Hard Constraints).
 
 ---
 
 ## Experiment Backlog
 
-| # | Experiment | Mô tả | Depends on |
+| # | Experiment | Mô tả | Status |
 |---|---|---|---|
-| 6 | Ensemble tuning | Grid search α trong `α*p1 + (1-α)*p3` | Exp 4/5 checkpoint |
-| 7 | Full pipeline eval | AUC ensemble > 88.01? Map quality OK? | Exp 5 + 6 |
+| 5 | Stage 1: Baseline purely | Train VadCLIP không logits3 losses, verify 0.8801 | TODO |
+| 6 | Stage 2: Frozen + map_head | Train map_head trên frozen backbone | Depends on Exp 5 |
+| 7 | Full pipeline eval | AUC ≥ 0.8801 + map quality OK? | Depends on Exp 5+6 |

@@ -9,7 +9,7 @@ import torch
 import numpy as np
 from torch.utils.data import DataLoader
 from sklearn.metrics import roc_auc_score
-from scipy.optimize import minimize_scalar
+from sklearn.linear_model import LogisticRegression
 from tqdm import tqdm
 
 from model import CLIPVAD
@@ -63,23 +63,22 @@ def platt_calibrate(raw_logits, temp, bias):
     return 1.0 / (1.0 + np.exp(-(raw_logits - bias) / temp))
 
 
-def grid_search_platt(raw_logits, gt):
-    """Grid search for best temperature and bias."""
-    best_auc = 0
-    best_params = (1.0, 0.0)
+def mle_platt(raw_logits, gt, balanced=True):
+    """Fit Platt scaling via MLE with optional class balancing.
 
-    temps = [0.05, 0.1, 0.15, 0.2, 0.3, 0.5, 0.7, 1.0]
-    biases = np.linspace(np.percentile(raw_logits, 10), np.percentile(raw_logits, 90), 20)
-
-    for temp in temps:
-        for bias in biases:
-            scores = platt_calibrate(raw_logits, temp, bias)
-            auc = roc_auc_score(gt, scores)
-            if auc > best_auc:
-                best_auc = auc
-                best_params = (temp, bias)
-
-    return best_params, best_auc
+    UCF-Crime test has ~85% normal frames — unbalanced MLE biases toward
+    predicting low scores. `balanced=True` rebalances class weights so
+    the calibration isn't dominated by the majority class.
+    """
+    X = raw_logits.reshape(-1, 1)
+    cw = 'balanced' if balanced else None
+    lr = LogisticRegression(C=1e6, solver='lbfgs', max_iter=1000, class_weight=cw)
+    lr.fit(X, gt)
+    coef = lr.coef_[0, 0]
+    intercept = lr.intercept_[0]
+    temp = 1.0 / coef
+    bias = -intercept / coef
+    return (temp, bias)
 
 
 def analyze_calibration(raw_logits, gt, temp, bias):
@@ -132,7 +131,7 @@ if __name__ == '__main__':
     print(f"\nRaw logits3: mean={raw_logits.mean():.3f} std={raw_logits.std():.3f} "
           f"min={raw_logits.min():.3f} max={raw_logits.max():.3f}")
 
-    (best_temp, best_bias), best_auc = grid_search_platt(raw_logits, gt)
+    best_temp, best_bias = mle_platt(raw_logits, gt)
     calibrated_scores = analyze_calibration(raw_logits, gt, best_temp, best_bias)
 
     # Save calibrated scores and params

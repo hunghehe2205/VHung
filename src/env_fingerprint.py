@@ -43,20 +43,31 @@ def summarize_tensor(t):
 
 @contextlib.contextmanager
 def sdp_backend(enable_flash, enable_math, enable_mem_efficient):
-    """Force attention SDP kernel backend if available."""
-    if hasattr(torch.backends.cuda, 'sdp_kernel'):
-        with torch.backends.cuda.sdp_kernel(
+    """Force attention SDP kernel backend (torch 2.0+ only)."""
+    sdp = getattr(torch.backends.cuda, 'sdp_kernel', None)
+    if sdp is None:
+        yield
+        return
+    try:
+        with sdp(
             enable_flash=enable_flash,
             enable_math=enable_math,
             enable_mem_efficient=enable_mem_efficient,
         ):
             yield
-    else:
+    except TypeError:
+        # Older signature or unavailable kwargs → skip
         yield
 
 
 def set_config(name):
     """Apply a named env config and return sdp context."""
+    # Reset TF32 defaults
+    if hasattr(torch.backends.cuda, 'matmul'):
+        torch.backends.cuda.matmul.allow_tf32 = True
+    if hasattr(torch.backends.cudnn, 'allow_tf32'):
+        torch.backends.cudnn.allow_tf32 = True
+
     if name == 'default':
         torch.backends.cudnn.deterministic = False
         torch.backends.cudnn.benchmark = True
@@ -69,6 +80,16 @@ def set_config(name):
         except Exception:
             pass
         return sdp_backend(True, True, True)
+    elif name == 'no_tf32':
+        # Disable TF32 (Ampere+ GPUs default to TF32 for matmul/cudnn);
+        # original paper likely trained on older GPU without TF32 → FP32 numerics differ.
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        if hasattr(torch.backends.cuda, 'matmul'):
+            torch.backends.cuda.matmul.allow_tf32 = False
+        if hasattr(torch.backends.cudnn, 'allow_tf32'):
+            torch.backends.cudnn.allow_tf32 = False
+        return sdp_backend(False, True, False)
     elif name == 'math_sdp':
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
@@ -76,10 +97,6 @@ def set_config(name):
             torch.use_deterministic_algorithms(True, warn_only=True)
         except Exception:
             pass
-        return sdp_backend(False, True, False)
-    elif name == 'fp64_math':
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
         return sdp_backend(False, True, False)
     else:
         raise ValueError(name)
@@ -212,8 +229,9 @@ def diff_summaries(base, other, name):
 
 if __name__ == '__main__':
     option.parser.add_argument('--fixed-sample-idx', default=0, type=int)
-    option.parser.add_argument('--configs', default='default,cudnn_det,math_sdp',
-                               help='Comma-separated configs to test')
+    option.parser.add_argument('--configs', default='default,cudnn_det,no_tf32',
+                               help='Comma-separated configs to test '
+                                    '(default, cudnn_det, no_tf32, math_sdp)')
     device = "cuda" if torch.cuda.is_available() else "cpu"
     args = option.parser.parse_args()
 

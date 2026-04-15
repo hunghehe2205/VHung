@@ -35,6 +35,8 @@ parser.add_argument('--gt-label-path', default='list/gt_label_ucf.npy')
 parser.add_argument('--train-json',
                     default='HIVAU-70k-NEW/ucf_database_train_filtered.json')
 parser.add_argument('--pos-weight-path', default='list/pos_weight_bin.npy')
+parser.add_argument('--pos-weight', default=None, type=float,
+                    help='Override pos_weight scalar directly (skips --pos-weight-path)')
 parser.add_argument('--phase1-epochs', default=3, type=int)
 parser.add_argument('--phase2-epochs', default=6, type=int)
 parser.add_argument('--lambda1', default=0.1, type=float)
@@ -43,5 +45,11 @@ parser.add_argument('--focal-gamma', default=2.0, type=float,
                     help='0 = plain BCE, >0 = focal BCE with that gamma')
 parser.add_argument('--phase3-loss', default='tv', choices=['tv', 'dice'],
                     help='Phase 3 localization loss: tv or dice')
+parser.add_argument('--lambda-contrast', default=0.0, type=float,
+                    help='Weight for within-video contrast loss (Phase 3). 0 = off')
+parser.add_argument('--contrast-margin', default=0.3, type=float,
+                    help='Margin for within-video contrast loss')
 parser.add_argument('--upsample', default='repeat', choices=['repeat', 'linear'],
                     help='Eval upsample mode: step-function (repeat) or linear interp')
+parser.add_argument('--normalize', action='store_true',
+                    help='Viz: min-max normalize prob per video to see shape')

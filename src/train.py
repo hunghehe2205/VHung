@@ -86,6 +86,21 @@ def dice_loss_anomaly(probs, target, mask, eps=1.0):
     return ((1.0 - dice) * has_pos).sum() / has_pos.sum().clamp_min(1.0)
 
 
+def within_video_contrast_loss(probs, target, mask, margin=0.3):
+    """Per anomaly video: mean prob inside GT must exceed mean prob outside
+    by at least `margin`. Forces peak AT the correct location rather than
+    uniformly-high output. Normal videos skipped (no inside region).
+    """
+    valid = mask.float()
+    inside = (target > 0.5).float() * valid
+    outside = (1.0 - (target > 0.5).float()) * valid
+    has_inside = (inside.sum(-1) > 0).float()
+    inside_mean = (probs * inside).sum(-1) / inside.sum(-1).clamp_min(1.0)
+    outside_mean = (probs * outside).sum(-1) / outside.sum(-1).clamp_min(1.0)
+    gap_loss = F.relu(margin - (inside_mean - outside_mean))
+    return (gap_loss * has_inside).sum() / has_inside.sum().clamp_min(1.0)
+
+
 def frame_bce_loss(logits, target, mask, pos_weight):
     """Frame-level binary BCE on logits1 with scalar pos_weight.
     logits: [B, T] raw logits.
@@ -138,9 +153,13 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
     scheduler = MultiStepLR(optimizer, args.scheduler_milestones, args.scheduler_rate)
     prompt_text = get_prompt_text(label_map)
 
-    # Load pos_weight scalar (precomputed once by compute_pos_weight.py)
-    pos_weight_bin = torch.tensor(
-        np.load(args.pos_weight_path).astype(np.float32), device=device)
+    # pos_weight scalar: --pos-weight overrides --pos-weight-path (legacy npy)
+    if args.pos_weight is not None:
+        pos_weight_bin = torch.tensor([args.pos_weight], dtype=torch.float32,
+                                      device=device)
+    else:
+        pos_weight_bin = torch.tensor(
+            np.load(args.pos_weight_path).astype(np.float32), device=device)
 
     ap_best = 0.0   # best avg_mAP (class-agnostic)
     start_epoch = 0
@@ -160,7 +179,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         lam1, lam2 = get_lambda(e, args.phase1_epochs, args.phase2_epochs,
                                 args.lambda1, args.lambda2)
         model.train()
-        sum_bce_v = sum_nce = sum_cts = sum_fbce = sum_p3 = 0.0
+        sum_bce_v = sum_nce = sum_cts = sum_fbce = sum_p3 = sum_ctr = 0.0
         n_iters = min(len(normal_loader), len(anomaly_loader))
         t_start = time.time()
         pbar = tqdm(range(n_iters),
@@ -209,10 +228,11 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             else:
                 loss_fbce = torch.zeros(1, device=device)
 
-            if lam2 > 0:
+            if lam2 > 0 or args.lambda_contrast > 0:
                 probs = torch.sigmoid(logits1.squeeze(-1))
                 mask_T2 = (torch.arange(probs.shape[1], device=device)
                            .unsqueeze(0) < lengths.unsqueeze(1))
+            if lam2 > 0:
                 if args.phase3_loss == 'dice':
                     loss_p3 = dice_loss_anomaly(probs, y_bin, mask_T2)
                 else:
@@ -220,8 +240,15 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             else:
                 loss_p3 = torch.zeros(1, device=device)
 
+            if lam2 > 0 and args.lambda_contrast > 0:
+                loss_ctr = within_video_contrast_loss(
+                    probs, y_bin, mask_T2, margin=args.contrast_margin)
+            else:
+                loss_ctr = torch.zeros(1, device=device)
+
             loss = (loss_bce_v + loss_nce + loss_cts
-                    + lam1 * loss_fbce + lam2 * loss_p3)
+                    + lam1 * loss_fbce + lam2 * loss_p3
+                    + args.lambda_contrast * loss_ctr)
 
             optimizer.zero_grad()
             loss.backward()
@@ -232,11 +259,13 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             sum_cts   += float(loss_cts)
             sum_fbce  += float(loss_fbce)
             sum_p3    += float(loss_p3)
+            sum_ctr   += float(loss_ctr)
             pbar.set_postfix(bce_v=sum_bce_v / (i + 1),
                              nce=sum_nce / (i + 1),
                              cts=sum_cts / (i + 1),
                              fbce=sum_fbce / (i + 1),
-                             p3=sum_p3 / (i + 1))
+                             p3=sum_p3 / (i + 1),
+                             ctr=sum_ctr / (i + 1))
 
         train_secs = time.time() - t_start
         avg_bce_v = sum_bce_v / n_iters
@@ -244,6 +273,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         avg_cts = sum_cts / n_iters
         avg_fbce = sum_fbce / n_iters
         avg_p3 = sum_p3 / n_iters
+        avg_ctr = sum_ctr / n_iters
 
         # End-of-epoch eval — model selection by class-agnostic avg_mAP
         AUC, avg_mAP, dmap_ag = test(
@@ -255,7 +285,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         print(f'[ep {e+1:2d}/{args.max_epoch} {train_secs:.0f}s] '
               f'lam=({lam1},{lam2}) | '
               f'bce_v={avg_bce_v:.3f} nce={avg_nce:.3f} cts={avg_cts:.4f} '
-              f'fbce={avg_fbce:.3f} p3={avg_p3:.3f} | '
+              f'fbce={avg_fbce:.3f} p3={avg_p3:.3f} ctr={avg_ctr:.3f} | '
               f'AUC={AUC:.4f} mAP={avg_mAP:.2f} [{ag_str}]{tag}',
               flush=True)
         if is_best:

@@ -1,4 +1,6 @@
 import os
+import sys
+import time
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -59,6 +61,16 @@ def soft_iou_loss(probs, target, mask, eps=1e-6):
     return (1.0 - iou).mean()
 
 
+def tv_smoothness_loss(probs, mask):
+    """Total-variation temporal smoothness on [B, T] probs.
+    Penalizes |p_t - p_{t-1}| over frames where both t and t-1 are valid.
+    Returns scalar = mean per-transition absolute difference.
+    """
+    diffs = (probs[:, 1:] - probs[:, :-1]).abs()
+    valid = (mask[:, 1:] & mask[:, :-1]).float()
+    return (diffs * valid).sum() / valid.sum().clamp_min(1.0)
+
+
 def frame_bce_loss(logits, target, mask, pos_weight):
     """Frame-level binary BCE on logits1 with scalar pos_weight.
     logits: [B, T] raw logits.
@@ -70,6 +82,21 @@ def frame_bce_loss(logits, target, mask, pos_weight):
     target_m = target[mask]
     return F.binary_cross_entropy_with_logits(
         logits_m, target_m, pos_weight=pos_weight.to(logits_m.device))
+
+
+def focal_bce_loss(logits, target, mask, pos_weight, gamma=2.0):
+    """Focal BCE on logits1. Combines pos_weight (class balance) with
+    focal modulation (1 - p_t)^gamma to emphasize hard frames.
+    """
+    logits_m = logits[mask]
+    target_m = target[mask]
+    bce = F.binary_cross_entropy_with_logits(
+        logits_m, target_m, pos_weight=pos_weight.to(logits_m.device),
+        reduction='none')
+    p = torch.sigmoid(logits_m)
+    p_t = p * target_m + (1.0 - p) * (1.0 - target_m)
+    focal_w = (1.0 - p_t).clamp_min(1e-6) ** gamma
+    return (focal_w * bce).mean()
 
 
 def get_lambda(epoch, phase1_epochs, phase2_epochs, lambda1, lambda2):
@@ -118,10 +145,12 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         lam1, lam2 = get_lambda(e, args.phase1_epochs, args.phase2_epochs,
                                 args.lambda1, args.lambda2)
         model.train()
-        sum_bce_v = sum_nce = sum_cts = sum_fbce = sum_iou = 0.0
+        sum_bce_v = sum_nce = sum_cts = sum_fbce = sum_tv = 0.0
         n_iters = min(len(normal_loader), len(anomaly_loader))
+        t_start = time.time()
         pbar = tqdm(range(n_iters),
-                    desc=f'Ep {e+1}/{args.max_epoch} lam1={lam1} lam2={lam2}')
+                    desc=f'Ep {e+1}/{args.max_epoch}',
+                    disable=not sys.stderr.isatty(), leave=False)
 
         normal_iter = iter(normal_loader)
         anomaly_iter = iter(anomaly_loader)
@@ -155,7 +184,8 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                 logits1_2d = logits1.squeeze(-1)                          # [2B, T]
                 mask_T = (torch.arange(logits1_2d.shape[1], device=device)
                           .unsqueeze(0) < lengths.unsqueeze(1))            # [2B, T]
-                loss_fbce = frame_bce_loss(logits1_2d, y_bin, mask_T, pos_weight_bin)
+                loss_fbce = focal_bce_loss(logits1_2d, y_bin, mask_T,
+                                           pos_weight_bin, gamma=args.focal_gamma)
             else:
                 loss_fbce = torch.zeros(1, device=device)
 
@@ -163,12 +193,12 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                 probs = torch.sigmoid(logits1.squeeze(-1))
                 mask_T2 = (torch.arange(probs.shape[1], device=device)
                            .unsqueeze(0) < lengths.unsqueeze(1))
-                loss_iou = soft_iou_loss(probs, y_bin, mask_T2)
+                loss_tv = tv_smoothness_loss(probs, mask_T2)
             else:
-                loss_iou = torch.zeros(1, device=device)
+                loss_tv = torch.zeros(1, device=device)
 
             loss = (loss_bce_v + loss_nce + loss_cts
-                    + lam1 * loss_fbce + lam2 * loss_iou)
+                    + lam1 * loss_fbce + lam2 * loss_tv)
 
             optimizer.zero_grad()
             loss.backward()
@@ -178,24 +208,39 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             sum_nce   += float(loss_nce)
             sum_cts   += float(loss_cts)
             sum_fbce  += float(loss_fbce)
-            sum_iou   += float(loss_iou)
+            sum_tv    += float(loss_tv)
             pbar.set_postfix(bce_v=sum_bce_v / (i + 1),
                              nce=sum_nce / (i + 1),
                              cts=sum_cts / (i + 1),
                              fbce=sum_fbce / (i + 1),
-                             iou=sum_iou / (i + 1))
+                             tv=sum_tv / (i + 1))
+
+        train_secs = time.time() - t_start
+        avg_bce_v = sum_bce_v / n_iters
+        avg_nce = sum_nce / n_iters
+        avg_cts = sum_cts / n_iters
+        avg_fbce = sum_fbce / n_iters
+        avg_tv = sum_tv / n_iters
 
         # End-of-epoch eval — model selection by class-agnostic avg_mAP
-        AUC, avg_mAP = test(model, testloader, args.visual_length, prompt_text,
-                            gt, gtsegments, gtlabels, device)
-        print(f'[epoch {e+1}] AUC={AUC:.4f}  avg_mAP_agnostic={avg_mAP:.2f}')
-        if avg_mAP > ap_best:
+        AUC, avg_mAP, dmap_ag = test(
+            model, testloader, args.visual_length, prompt_text,
+            gt, gtsegments, gtlabels, device, quiet=True)
+        ag_str = '/'.join(f'{v:.2f}' for v in dmap_ag[:5])
+        is_best = avg_mAP > ap_best
+        tag = ' *' if is_best else ''
+        print(f'[ep {e+1:2d}/{args.max_epoch} {train_secs:.0f}s] '
+              f'lam=({lam1},{lam2}) | '
+              f'bce_v={avg_bce_v:.3f} nce={avg_nce:.3f} cts={avg_cts:.4f} '
+              f'fbce={avg_fbce:.3f} tv={avg_tv:.3f} | '
+              f'AUC={AUC:.4f} mAP={avg_mAP:.2f} [{ag_str}]{tag}',
+              flush=True)
+        if is_best:
             ap_best = avg_mAP
             torch.save({'epoch': e,
                         'model_state_dict': model.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
                         'ap': ap_best}, args.checkpoint_path)
-            print(f'  -> new best ({avg_mAP:.2f}), checkpoint saved')
 
         scheduler.step()
         torch.save(model.state_dict(), 'final_model/model_cur.pth')

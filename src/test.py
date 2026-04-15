@@ -1,3 +1,4 @@
+import sys
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -20,7 +21,8 @@ LABEL_MAP = {
 }
 
 
-def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, device):
+def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, device,
+         quiet=False):
     model.to(device)
     model.eval()
 
@@ -28,7 +30,9 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, d
 
     with torch.no_grad():
         ap1_per_video = []
-        for i, item in enumerate(tqdm(testdataloader, desc='Testing')):
+        iterator = testdataloader if quiet else tqdm(
+            testdataloader, desc='Testing', disable=not sys.stderr.isatty())
+        for i, item in enumerate(iterator):
             visual = item[0].squeeze(0)
             length = int(item[2])
             len_cur = length
@@ -78,30 +82,26 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, d
     ROC2 = roc_auc_score(gt, np.repeat(ap2, 16))
     AP2 = average_precision_score(gt, np.repeat(ap2, 16))
 
-    print("AUC1: ", ROC1, " AP1: ", AP1)
-    print("AUC2: ", ROC2, " AP2:", AP2)
-
     from utils.detection_map import getDetectionMAP_agnostic
 
     # Per-class (legacy)
     dmap_pc, iou = dmAP(element_logits2_stack, gtsegments, gtlabels,
                        excludeNormal=False)
-    averageMAP_pc = 0.0
-    for i in range(5):
-        print('[per-class] mAP@{0:.1f} ={1:.2f}%'.format(iou[i], dmap_pc[i]))
-        averageMAP_pc += dmap_pc[i]
-    averageMAP_pc = averageMAP_pc / 5
-    print('[per-class] AVG mAP: {:.2f}'.format(averageMAP_pc))
+    averageMAP_pc = float(np.mean(dmap_pc[:5]))
 
-    # Class-agnostic (new): upsample each per-video prob1 array ×16 to frame granularity
+    # Class-agnostic: upsample each per-video prob1 array ×16 to frame granularity
     agnostic_stack = [np.repeat(fs, 16) for fs in ap1_per_video]
     dmap_ag, _ = getDetectionMAP_agnostic(agnostic_stack, gtsegments, gtlabels)
     averageMAP_ag = float(np.mean(dmap_ag))
-    for i in range(5):
-        print('[agnostic ] mAP@{0:.1f} ={1:.2f}%'.format(iou[i], dmap_ag[i]))
-    print('[agnostic ] AVG mAP: {:.2f}'.format(averageMAP_ag))
 
-    return ROC1, averageMAP_ag
+    if not quiet:
+        print(f"AUC1={ROC1:.4f} AP1={AP1:.4f} | AUC2={ROC2:.4f} AP2={AP2:.4f}")
+        pc_str = '/'.join(f'{v:.2f}' for v in dmap_pc[:5])
+        ag_str = '/'.join(f'{v:.2f}' for v in dmap_ag[:5])
+        print(f"[per-class] AVG={averageMAP_pc:.2f} [{pc_str}]")
+        print(f"[agnostic ] AVG={averageMAP_ag:.2f} [{ag_str}]")
+
+    return ROC1, averageMAP_ag, dmap_ag
 
 
 if __name__ == '__main__':

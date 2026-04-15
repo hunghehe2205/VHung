@@ -55,9 +55,10 @@ class DistanceAdj(Module):
         self.sigma.data.fill_(0.1)
 
     def forward(self, batch_size, max_seqlen):
+        device = self.sigma.device
         self.arith = np.arange(max_seqlen).reshape(-1, 1)
         dist = pdist(self.arith, metric='cityblock').astype(np.float32)
-        self.dist = torch.from_numpy(squareform(dist)).to('cuda')
+        self.dist = torch.from_numpy(squareform(dist)).to(device)
         self.dist = torch.exp(-self.dist / torch.exp(torch.tensor(1.)))
-        self.dist = torch.unsqueeze(self.dist, 0).repeat(batch_size, 1, 1).to('cuda')
+        self.dist = torch.unsqueeze(self.dist, 0).repeat(batch_size, 1, 1).to(device)
         return self.dist

@@ -266,11 +266,17 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             }, args.checkpoint_path)
 
         scheduler.step()
-        torch.save(model.state_dict(), 'final_model/model_cur.pth')
+        # Per-run "current state" lives under log_dir so parallel runs don't
+        # clobber each other.
+        torch.save(model.state_dict(), os.path.join(args.log_dir, 'model_cur.pth'))
 
+    # Final state is saved next to the per-run checkpoint, never overwriting
+    # --model-path (which is the baseline used for loading).
     if os.path.exists(args.checkpoint_path):
         ckpt = torch.load(args.checkpoint_path, weights_only=False)
-        torch.save(ckpt['model_state_dict'], args.model_path)
+        final_state_path = args.checkpoint_path.replace('.pth', '_final_state.pth')
+        torch.save(ckpt['model_state_dict'], final_state_path)
+        log_metrics(logger, f"Final state saved: {final_state_path}")
     log_metrics(logger,
         f"=== Training finished. Best Binary mAP AVG: {best_map_avg:.4f} ===")
 

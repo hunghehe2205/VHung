@@ -197,3 +197,40 @@ def binary_detection_map(predictions: list,
 
     result['map_avg'] = float(np.mean(aps))
     return result
+
+
+def compute_per_video_metrics(scores: np.ndarray, mask: np.ndarray) -> dict:
+    """Combine separation + mass + density for one video."""
+    out = {}
+    out.update(separation_stats(scores, mask))
+    out.update(mass_stats(scores, mask))
+    out.update(density_stats(scores, mask))
+    return out
+
+
+def composite_map_score(metrics: dict,
+                        w_gap: float = 0.25,
+                        w_mcl: float = 0.25,
+                        w_map: float = 0.25,
+                        w_pc: float = 0.25,
+                        mcl_ref: float = 3.0) -> float:
+    """Scalar score ∈ ≈[0,1] for checkpoint selection.
+
+    Components:
+      - Gap (clipped to [0,1])
+      - MCL normalized to [0,1] by dividing by mcl_ref then clipping
+      - mAP@IoU average
+      - 1 − PeakConcentration
+    Missing keys default to 0 (conservative: a missing metric does not help the score).
+    """
+    gap = float(np.nan_to_num(metrics.get('gap', 0.0), nan=0.0))
+    mcl = float(np.nan_to_num(metrics.get('mcl', 0.0), nan=0.0))
+    map_avg = float(np.nan_to_num(metrics.get('map_avg', 0.0), nan=0.0))
+    pc = float(np.nan_to_num(metrics.get('peak_concentration', 1.0), nan=1.0))
+
+    gap_c = max(0.0, min(1.0, gap))
+    mcl_c = max(0.0, min(1.0, mcl / mcl_ref))
+    map_c = max(0.0, min(1.0, map_avg))
+    anti_spike = max(0.0, min(1.0, 1.0 - pc))
+
+    return w_gap * gap_c + w_mcl * mcl_c + w_map * map_c + w_pc * anti_spike

@@ -103,7 +103,7 @@ def test_density_normal_video():
     assert np.isnan(d['in_event_cov_05'])
 
 
-from src.utils.map_metrics import binary_detection_map
+from src.utils.map_metrics import binary_detection_map, compute_per_video_metrics, composite_map_score
 
 
 def test_binary_detection_map_perfect():
@@ -134,3 +134,26 @@ def test_binary_detection_map_single_spike():
     result = binary_detection_map([pred], [[[40, 60]]])
     # At IoU >= 0.1, prediction matches nothing → mAP=0
     assert result['map_at_iou_01'] == pytest.approx(0.0)
+
+
+def test_per_video_metrics_perfect():
+    scores = np.zeros(100); scores[40:60] = 1.0
+    mask = np.zeros(100); mask[40:60] = 1.0
+    m = compute_per_video_metrics(scores, mask)
+    assert m['gap'] == pytest.approx(1.0)
+    assert m['mcl'] == pytest.approx(5.0)
+    assert m['peak_concentration'] == pytest.approx(0.1)
+
+
+def test_composite_map_score_uniform_zero():
+    m = {'gap': 0.0, 'mcl': 1.0, 'map_avg': 0.0, 'peak_concentration': 0.1}
+    score = composite_map_score(m)
+    # gap=0, mcl/3=0.33, map=0, (1-pc)=0.9 → 0.25*0 + 0.25*0.33 + 0.25*0 + 0.25*0.9 = 0.308
+    assert 0.3 < score < 0.32
+
+
+def test_composite_map_score_perfect():
+    m = {'gap': 1.0, 'mcl': 5.0, 'map_avg': 1.0, 'peak_concentration': 0.1}
+    score = composite_map_score(m)
+    # gap=1, clip(mcl/3,0,1)=1, map=1, (1-pc)=0.9 → 0.25*(1+1+1+0.9) = 0.975
+    assert 0.97 < score < 0.98

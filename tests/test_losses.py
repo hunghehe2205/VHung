@@ -41,3 +41,15 @@ def test_frame_bce_uses_pos_weight():
     l_low = frame_bce_loss(logits, y, mask, pw_low).item()
     l_high = frame_bce_loss(logits, y, mask, pw_high).item()
     assert l_high > l_low
+
+
+from train import get_lambda
+
+
+def test_get_lambda_phases():
+    assert get_lambda(0, 3, 6, 0.1, 0.1) == (0.0, 0.0)
+    assert get_lambda(2, 3, 6, 0.1, 0.1) == (0.0, 0.0)
+    assert get_lambda(3, 3, 6, 0.1, 0.1) == (0.1, 0.0)
+    assert get_lambda(5, 3, 6, 0.1, 0.1) == (0.1, 0.0)
+    assert get_lambda(6, 3, 6, 0.1, 0.1) == (0.1, 0.1)
+    assert get_lambda(9, 3, 6, 0.1, 0.1) == (0.1, 0.1)

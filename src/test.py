@@ -21,15 +21,46 @@ LABEL_MAP = {
 }
 
 
+def _upsample_linear_1d(x, factor):
+    """Linear temporal upsample of 1D array [T] -> [T*factor]. T-step i is
+    treated as a sample at frame i*factor + (factor-1)/2; edges hold endpoint.
+    """
+    x = np.asarray(x, dtype=np.float32)
+    T = len(x)
+    if T == 0:
+        return x
+    centers = np.arange(T) * factor + (factor - 1) / 2.0
+    frame_idx = np.arange(T * factor)
+    return np.interp(frame_idx, centers, x)
+
+
+def _upsample_linear_2d(x, factor):
+    """Axis-0 linear upsample of 2D array [T, C] -> [T*factor, C]."""
+    x = np.asarray(x, dtype=np.float32)
+    T, C = x.shape
+    out = np.empty((T * factor, C), dtype=np.float32)
+    for c in range(C):
+        out[:, c] = _upsample_linear_1d(x[:, c], factor)
+    return out
+
+
 def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, device,
-         quiet=False):
+         quiet=False, upsample='repeat'):
     model.to(device)
     model.eval()
+
+    if upsample == 'linear':
+        up1d = lambda v: _upsample_linear_1d(v, 16)
+        up2d = lambda v: _upsample_linear_2d(v, 16)
+    else:
+        up1d = lambda v: np.repeat(v, 16)
+        up2d = lambda v: np.repeat(v, 16, 0)
 
     element_logits2_stack = []
 
     with torch.no_grad():
         ap1_per_video = []
+        ap2_per_video = []
         iterator = testdataloader if quiet else tqdm(
             testdataloader, desc='Testing', disable=not sys.stderr.isatty())
         for i, item in enumerate(iterator):
@@ -62,25 +93,19 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, d
             prob2 = (1 - logits2[0:len_cur].softmax(dim=-1)[:, 0].squeeze(-1))
             prob1 = torch.sigmoid(logits1[0:len_cur].squeeze(-1))
             ap1_per_video.append(prob1.cpu().numpy())
-
-            if i == 0:
-                ap1 = prob1
-                ap2 = prob2
-            else:
-                ap1 = torch.cat([ap1, prob1], dim=0)
-                ap2 = torch.cat([ap2, prob2], dim=0)
+            ap2_per_video.append(prob2.cpu().numpy())
 
             element_logits2 = logits2[0:len_cur].softmax(dim=-1).detach().cpu().numpy()
-            element_logits2 = np.repeat(element_logits2, 16, 0)
+            element_logits2 = up2d(element_logits2)
             element_logits2_stack.append(element_logits2)
 
-    ap1 = ap1.cpu().numpy().tolist()
-    ap2 = ap2.cpu().numpy().tolist()
+    ap1_frame = np.concatenate([up1d(v) for v in ap1_per_video])
+    ap2_frame = np.concatenate([up1d(v) for v in ap2_per_video])
 
-    ROC1 = roc_auc_score(gt, np.repeat(ap1, 16))
-    AP1 = average_precision_score(gt, np.repeat(ap1, 16))
-    ROC2 = roc_auc_score(gt, np.repeat(ap2, 16))
-    AP2 = average_precision_score(gt, np.repeat(ap2, 16))
+    ROC1 = roc_auc_score(gt, ap1_frame)
+    AP1 = average_precision_score(gt, ap1_frame)
+    ROC2 = roc_auc_score(gt, ap2_frame)
+    AP2 = average_precision_score(gt, ap2_frame)
 
     from utils.detection_map import getDetectionMAP_agnostic
 
@@ -90,7 +115,7 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, d
     averageMAP_pc = float(np.mean(dmap_pc[:5]))
 
     # Class-agnostic: upsample each per-video prob1 array ×16 to frame granularity
-    agnostic_stack = [np.repeat(fs, 16) for fs in ap1_per_video]
+    agnostic_stack = [up1d(fs) for fs in ap1_per_video]
     dmap_ag, _ = getDetectionMAP_agnostic(agnostic_stack, gtsegments, gtlabels)
     averageMAP_ag = float(np.mean(dmap_ag))
 
@@ -121,4 +146,5 @@ if __name__ == '__main__':
                     args.prompt_prefix, args.prompt_postfix, device)
     model.load_state_dict(torch.load(args.model_path, weights_only=False, map_location=device))
 
-    test(model, testdataloader, args.visual_length, prompt_text, gt, gtsegments, gtlabels, device)
+    test(model, testdataloader, args.visual_length, prompt_text, gt, gtsegments, gtlabels, device,
+         upsample=args.upsample)

@@ -43,3 +43,5 @@ parser.add_argument('--focal-gamma', default=2.0, type=float,
                     help='0 = plain BCE, >0 = focal BCE with that gamma')
 parser.add_argument('--phase3-loss', default='tv', choices=['tv', 'dice'],
                     help='Phase 3 localization loss: tv or dice')
+parser.add_argument('--upsample', default='repeat', choices=['repeat', 'linear'],
+                    help='Eval upsample mode: step-function (repeat) or linear interp')

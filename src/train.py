@@ -95,87 +95,115 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     scheduler = MultiStepLR(optimizer, args.scheduler_milestones, args.scheduler_rate)
     prompt_text = get_prompt_text(label_map)
-    ap_best = 0
-    epoch = 0
+
+    # Load pos_weight scalar (precomputed once by compute_pos_weight.py)
+    pos_weight_bin = torch.tensor(
+        np.load(args.pos_weight_path).astype(np.float32), device=device)
+
+    ap_best = 0.0   # best avg_mAP (class-agnostic)
+    start_epoch = 0
 
     if args.use_checkpoint:
-        checkpoint = torch.load(args.checkpoint_path, weights_only=False)
+        checkpoint = torch.load(args.checkpoint_path, weights_only=False,
+                                map_location=device)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        epoch = checkpoint['epoch']
+        start_epoch = checkpoint['epoch']
         ap_best = checkpoint['ap']
-        print("checkpoint info:")
-        print("epoch:", epoch + 1, " ap:", ap_best)
+        print('checkpoint info: epoch', start_epoch + 1, 'avg_mAP', ap_best)
 
     os.makedirs('final_model', exist_ok=True)
 
-    for e in range(args.max_epoch):
+    for e in range(start_epoch, args.max_epoch):
+        lam1, lam2 = get_lambda(e, args.phase1_epochs, args.phase2_epochs,
+                                args.lambda1, args.lambda2)
         model.train()
-        loss_total1 = 0
-        loss_total2 = 0
+        sum_bce_v = sum_nce = sum_cts = sum_fbce = sum_iou = 0.0
+        n_iters = min(len(normal_loader), len(anomaly_loader))
+        pbar = tqdm(range(n_iters),
+                    desc=f'Ep {e+1}/{args.max_epoch} lam1={lam1} lam2={lam2}')
+
         normal_iter = iter(normal_loader)
         anomaly_iter = iter(anomaly_loader)
-        num_iters = min(len(normal_loader), len(anomaly_loader))
-        pbar = tqdm(range(num_iters), desc=f'Epoch {e+1}/{args.max_epoch}')
 
         for i in pbar:
-            step = 0
-            normal_features, normal_label, normal_lengths = next(normal_iter)
-            anomaly_features, anomaly_label, anomaly_lengths = next(anomaly_iter)
+            n_feat, n_lab, n_ybin, n_len = next(normal_iter)
+            a_feat, a_lab, a_ybin, a_len = next(anomaly_iter)
 
-            visual_features = torch.cat([normal_features, anomaly_features], dim=0).to(device)
-            text_labels = list(normal_label) + list(anomaly_label)
-            feat_lengths = torch.cat([normal_lengths, anomaly_lengths], dim=0).to(device)
-            text_labels = get_batch_label(text_labels, prompt_text, label_map).to(device)
+            visual = torch.cat([n_feat, a_feat], dim=0).to(device)
+            y_bin = torch.cat([n_ybin, a_ybin], dim=0).to(device)        # [2B, T]
+            text_labels = list(n_lab) + list(a_lab)
+            lengths = torch.cat([n_len, a_len], dim=0).to(device)
+            text_labels_t = get_batch_label(text_labels, prompt_text, label_map).to(device)
 
-            text_features, logits1, logits2 = model(visual_features, None, prompt_text, feat_lengths)
+            text_features, logits1, logits2 = model(visual, None, prompt_text, lengths)
 
-            loss1 = CLAS2(logits1, text_labels, feat_lengths, device)
-            loss_total1 += loss1.item()
+            # Original MIL losses (preserved)
+            loss_bce_v = CLAS2(logits1, text_labels_t, lengths, device)
+            loss_nce   = CLASM(logits2, text_labels_t, lengths, device)
 
-            loss2 = CLASM(logits2, text_labels, feat_lengths, device)
-            loss_total2 += loss2.item()
-
-            # Text feature divergence loss
-            loss3 = torch.zeros(1).to(device)
-            text_feature_normal = text_features[0] / text_features[0].norm(dim=-1, keepdim=True)
+            # Text feature divergence (unchanged structure)
+            loss_cts = torch.zeros(1).to(device)
+            tf_n = text_features[0] / text_features[0].norm(dim=-1, keepdim=True)
             for j in range(1, text_features.shape[0]):
-                text_feature_abr = text_features[j] / text_features[j].norm(dim=-1, keepdim=True)
-                loss3 += torch.abs(text_feature_normal @ text_feature_abr)
-            loss3 = loss3 / 13 * 1e-1
+                tf_a = text_features[j] / text_features[j].norm(dim=-1, keepdim=True)
+                loss_cts += torch.abs(tf_n @ tf_a)
+            loss_cts = loss_cts / 13 * 1e-1
 
-            loss = loss1 + loss2 + loss3
+            # New losses (phase-gated)
+            if lam1 > 0:
+                logits1_2d = logits1.squeeze(-1)                          # [2B, T]
+                mask_T = (torch.arange(logits1_2d.shape[1], device=device)
+                          .unsqueeze(0) < lengths.unsqueeze(1))            # [2B, T]
+                loss_fbce = frame_bce_loss(logits1_2d, y_bin, mask_T, pos_weight_bin)
+            else:
+                loss_fbce = torch.zeros(1, device=device)
+
+            if lam2 > 0:
+                probs = torch.sigmoid(logits1.squeeze(-1))
+                mask_T2 = (torch.arange(probs.shape[1], device=device)
+                           .unsqueeze(0) < lengths.unsqueeze(1))
+                loss_iou = soft_iou_loss(probs, y_bin, mask_T2)
+            else:
+                loss_iou = torch.zeros(1, device=device)
+
+            loss = (loss_bce_v + loss_nce + loss_cts
+                    + lam1 * loss_fbce + lam2 * loss_iou)
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-            pbar.set_postfix(loss1=loss_total1 / (i + 1),
-                             loss2=loss_total2 / (i + 1),
-                             loss3=loss3.item())
+            sum_bce_v += float(loss_bce_v)
+            sum_nce   += float(loss_nce)
+            sum_cts   += float(loss_cts)
+            sum_fbce  += float(loss_fbce)
+            sum_iou   += float(loss_iou)
+            pbar.set_postfix(bce_v=sum_bce_v / (i + 1),
+                             nce=sum_nce / (i + 1),
+                             cts=sum_cts / (i + 1),
+                             fbce=sum_fbce / (i + 1),
+                             iou=sum_iou / (i + 1))
 
-            step += i * normal_loader.batch_size * 2
-            if step % 1280 == 0 and step != 0:
-                AUC, AP = test(model, testloader, args.visual_length, prompt_text,
-                               gt, gtsegments, gtlabels, device)
-                AP = AUC
-
-                if AP > ap_best:
-                    ap_best = AP
-                    checkpoint = {
-                        'epoch': e,
+        # End-of-epoch eval — model selection by class-agnostic avg_mAP
+        AUC, avg_mAP = test(model, testloader, args.visual_length, prompt_text,
+                            gt, gtsegments, gtlabels, device)
+        print(f'[epoch {e+1}] AUC={AUC:.4f}  avg_mAP_agnostic={avg_mAP:.2f}')
+        if avg_mAP > ap_best:
+            ap_best = avg_mAP
+            torch.save({'epoch': e,
                         'model_state_dict': model.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
-                        'ap': ap_best}
-                    torch.save(checkpoint, args.checkpoint_path)
+                        'ap': ap_best}, args.checkpoint_path)
+            print(f'  -> new best ({avg_mAP:.2f}), checkpoint saved')
 
         scheduler.step()
         torch.save(model.state_dict(), 'final_model/model_cur.pth')
-        checkpoint = torch.load(args.checkpoint_path, weights_only=False)
-        model.load_state_dict(checkpoint['model_state_dict'])
 
-    checkpoint = torch.load(args.checkpoint_path, weights_only=False)
-    torch.save(checkpoint['model_state_dict'], args.model_path)
+    best_ck = torch.load(args.checkpoint_path, weights_only=False,
+                         map_location=device)
+    torch.save(best_ck['model_state_dict'], args.model_path)
+    print(f'Final best avg_mAP_agnostic = {ap_best:.2f}')
 
 
 def setup_seed(seed):
@@ -192,16 +220,22 @@ if __name__ == '__main__':
 
     label_map = LABEL_MAP
 
-    normal_dataset = UCFDataset(args.visual_length, args.train_list, False, label_map, True)
-    normal_loader = DataLoader(normal_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
-    anomaly_dataset = UCFDataset(args.visual_length, args.train_list, False, label_map, False)
-    anomaly_loader = DataLoader(anomaly_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
+    normal_dataset = UCFDataset(
+        args.visual_length, args.train_list, False, label_map, True,
+        json_path=args.train_json)
+    normal_loader = DataLoader(normal_dataset, batch_size=args.batch_size,
+                               shuffle=True, drop_last=True)
+    anomaly_dataset = UCFDataset(
+        args.visual_length, args.train_list, False, label_map, False,
+        json_path=args.train_json)
+    anomaly_loader = DataLoader(anomaly_dataset, batch_size=args.batch_size,
+                                shuffle=True, drop_last=True)
 
     test_dataset = UCFDataset(args.visual_length, args.test_list, True, label_map)
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
-    model = CLIPVAD(args.classes_num, args.embed_dim, args.visual_length, args.visual_width,
-                    args.visual_head, args.visual_layers, args.attn_window,
-                    args.prompt_prefix, args.prompt_postfix, device)
+    model = CLIPVAD(args.classes_num, args.embed_dim, args.visual_length,
+                    args.visual_width, args.visual_head, args.visual_layers,
+                    args.attn_window, args.prompt_prefix, args.prompt_postfix, device)
 
     train(model, normal_loader, anomaly_loader, test_loader, args, label_map, device)

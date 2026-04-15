@@ -54,6 +54,24 @@ parser.add_argument('--margin-temp', default=5.0, type=float,
                          'spreads gradient over more frames; higher approximates '
                          'true min/max but concentrates gradient on extremes.')
 
+# Ablation extras (default 0 = inactive). Flip one of these to 1.0 with
+# --w-{bce,dice,margin,var} 0 to run a single-loss ablation.
+parser.add_argument('--w-focal', default=0.0, type=float,
+                    help='Focal BCE weight. Down-weights easy frames via (1-p)^gamma.')
+parser.add_argument('--focal-gamma', default=2.0, type=float)
+parser.add_argument('--w-tversky', default=0.0, type=float,
+                    help='Tversky loss weight. Penalises FN more than FP when beta>alpha.')
+parser.add_argument('--tversky-alpha', default=0.3, type=float,
+                    help='FP penalty in Tversky.')
+parser.add_argument('--tversky-beta', default=0.7, type=float,
+                    help='FN penalty in Tversky. beta>alpha forces event coverage.')
+parser.add_argument('--w-hinge', default=0.0, type=float,
+                    help='Per-frame hinge loss weight. Directly enforces P1+P2 '
+                         '(event frames > threshold, non-event < threshold).')
+parser.add_argument('--hinge-threshold', default=0.5, type=float,
+                    help='Decision threshold for hinge_coverage_loss. '
+                         'Should match the segment-extraction threshold used at eval.')
+
 # Paths
 parser.add_argument('--model-path', default='final_model/model_ucf.pth')
 parser.add_argument('--use-checkpoint', default=False, type=bool)

@@ -150,6 +150,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
 
         sum_l1 = sum_l2 = sum_l3 = 0.0
         sum_bce = sum_margin = sum_dice = sum_var = 0.0
+        sum_focal = sum_tversky = sum_hinge = 0.0
         sum_total = 0.0
         sqsum_total = 0.0
         grad_norm_last = 0.0
@@ -191,6 +192,10 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                 w_bce=args.w_bce, w_margin=args.w_margin,
                 w_dice=args.w_dice, w_var=args.w_var,
                 margin_m=args.margin_m, margin_temp=args.margin_temp,
+                w_focal=args.w_focal, focal_gamma=args.focal_gamma,
+                w_tversky=args.w_tversky,
+                tversky_alpha=args.tversky_alpha, tversky_beta=args.tversky_beta,
+                w_hinge=args.w_hinge, hinge_threshold=args.hinge_threshold,
             )
 
             loss = loss_ca + beta * loss_d
@@ -199,7 +204,9 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                 log_metrics(logger,
                     f"[FATAL] non-finite loss epoch={e+1} iter={i}: total={loss.item()} "
                     f"l1={l1.item()} l2={l2.item()} l3={l3.item()} "
-                    f"bce={parts['bce']} margin={parts['margin']} dice={parts['dice']} var={parts['var']}")
+                    f"bce={parts['bce']} margin={parts['margin']} dice={parts['dice']} "
+                    f"var={parts['var']} focal={parts['focal']} tversky={parts['tversky']} "
+                    f"hinge={parts['hinge']}")
                 raise RuntimeError("Training aborted: non-finite loss.")
 
             optimizer.zero_grad()
@@ -211,11 +218,14 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             sum_l1 += l1.item(); sum_l2 += l2.item(); sum_l3 += l3.item()
             sum_bce += parts['bce']; sum_margin += parts['margin']
             sum_dice += parts['dice']; sum_var += parts['var']
+            sum_focal += parts['focal']; sum_tversky += parts['tversky']
+            sum_hinge += parts['hinge']
             lv = loss.item(); sum_total += lv; sqsum_total += lv * lv
 
             pbar.set_postfix(l1=sum_l1/(i+1), l2=sum_l2/(i+1),
-                             bce=sum_bce/(i+1), margin=sum_margin/(i+1),
-                             dice=sum_dice/(i+1))
+                             bce=sum_bce/(i+1), dice=sum_dice/(i+1),
+                             focal=sum_focal/(i+1), tversky=sum_tversky/(i+1),
+                             hinge=sum_hinge/(i+1))
 
         # ---- end of epoch: log + eval + checkpoint ----
         n = max(num_iters, 1)
@@ -228,7 +238,9 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             f"[Epoch {e+1}/{args.max_epoch}] beta={beta:.3f} | "
             f"l1={sum_l1/n:.4f} l2={sum_l2/n:.4f} l3={sum_l3/n:.4f} | "
             f"bce={sum_bce/n:.4f} margin={sum_margin/n:.4f} "
-            f"dice={sum_dice/n:.4f} var={sum_var/n:.4f} | "
+            f"dice={sum_dice/n:.4f} var={sum_var/n:.4f} "
+            f"focal={sum_focal/n:.4f} tversky={sum_tversky/n:.4f} "
+            f"hinge={sum_hinge/n:.4f} | "
             f"total={mean_total:.4f}±{std_total:.4f} grad={grad_norm_last:.2f} dt={epoch_dt:.1f}s")
 
         # Evaluate from D-Branch s_t.

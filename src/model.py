@@ -113,13 +113,17 @@ class CLIPVAD(nn.Module):
         nn.init.normal_(self.frame_position_embeddings.weight, std=0.01)
 
     def build_attention_mask(self, attn_window):
-        mask = torch.empty(self.visual_length, self.visual_length)
-        mask.fill_(float('-inf'))
-        for i in range(int(self.visual_length / attn_window)):
-            if (i + 1) * attn_window < self.visual_length:
-                mask[i * attn_window: (i + 1) * attn_window, i * attn_window: (i + 1) * attn_window] = 0
-            else:
-                mask[i * attn_window: self.visual_length, i * attn_window: self.visual_length] = 0
+        # Sliding-window mask: snippet i attends to [i - half, i + half].
+        # Replaces block-diagonal (non-overlapping) — gives continuous temporal
+        # context across former block boundaries so event boundaries are not
+        # cut off. See docs/.../2026-04-16-experiments-log.md Exp 7.
+        T = self.visual_length
+        mask = torch.full((T, T), float('-inf'))
+        half = attn_window // 2
+        for i in range(T):
+            lo = max(0, i - half)
+            hi = min(T, i + half + 1)
+            mask[i, lo:hi] = 0
         return mask
 
     def adj4(self, x, seq_len):

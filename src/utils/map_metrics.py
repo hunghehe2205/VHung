@@ -31,3 +31,20 @@ def separation_stats(scores: np.ndarray, mask: np.ndarray) -> dict:
     out_mean = float(out_frames.mean()) if out_frames.size > 0 else float('nan')
     gap = in_mean - out_mean
     return {'in_mean': in_mean, 'out_mean': out_mean, 'gap': gap}
+
+
+def mass_stats(scores: np.ndarray, mask: np.ndarray, eps: float = 1e-8) -> dict:
+    """Event-Mass Ratio (EMR), Event-Time Ratio (ETR), and Mass Concentration Lift (MCL).
+
+    EMR = Σ s_t(in-event) / Σ s_t(all)
+    ETR = |in-event| / |all|
+    MCL = EMR / ETR  (NaN if no events)
+    """
+    scores = np.asarray(scores, dtype=np.float64)
+    mask = np.asarray(mask, dtype=bool)
+    total_mass = scores.sum()
+    in_mass = scores[mask].sum()
+    emr = float(in_mass / (total_mass + eps)) if total_mass > 0 else 0.0
+    etr = float(mask.sum() / mask.size) if mask.size > 0 else 0.0
+    mcl = float(emr / etr) if etr > 0 else float('nan')
+    return {'emr': emr, 'etr': etr, 'mcl': mcl, 'mass_lift': emr - etr}

@@ -360,3 +360,48 @@ Results (`model_ucf.pth`):
 | 5 | Stage 1: Baseline purely | Train VadCLIP không logits3 losses, verify 0.8801 | TODO |
 | 6 | Stage 2: Frozen + map_head | Train map_head trên frozen backbone | Depends on Exp 5 |
 | 7 | Full pipeline eval | AUC ≥ 0.8801 + map quality OK? | Depends on Exp 5+6 |
+
+## Phase C — Map-First Objective (starting 2026-04-15)
+
+### Motivation
+
+Phases A–B and Exp 1–5 established that pushing logits3 toward AUC parity is
+a dead end: the p1 MIL head already covers AUC, and ensembling p3 with p1 shows
+p3 contributes no ranking signal (Exp 5 α*=1.0). Gradient interference from
+logits3's BCE/smoothness onto shared features costs ~1 pp of AUC1 (Exp 4).
+
+The real consumer of s_t is the CDF-cumsum keyframe sampler
+(`inference_viz/sampling.py:density_aware_sample`), which requires the map to
+be a *distribution over time*, not a ranking. That distribution has four
+properties we care about:
+
+1. **Separation** — s high inside events, low outside.
+2. **Mass concentration** — Σ s_t mass sits inside events (so cumsum zooms in).
+3. **Density** — mass is spread across the event, not concentrated on one spike.
+4. **Semantic retention** — logits2 still identifies the class (for description pipeline).
+
+### Changes
+
+- Removed `map_coverage_loss` and `map_ranking_loss` (max-based; rewarded spikes).
+- Added `map_mass_ratio_loss` (hinge on EMR ≥ ETR + margin) for Objective 2.
+- Added `map_density_loss` (1 − normalized in-event entropy) for Objective 3.
+- Initialized `AnomalyMapHead.conv2.bias = -1.0` so sigmoid starts near prior ETR.
+- Replaced AUC1-based checkpointing with a composite `MapScore`:
+  `0.25·Gap + 0.25·clip(MCL/3, 0, 1) + 0.25·mAP@IoU_avg + 0.25·(1 − PeakConc)`.
+
+### New metric suite (primary)
+
+| Group | Metric | Target |
+|---|---|---|
+| Separation | Gap, Normal-mean | ≥ 0.5, ≤ 0.2 |
+| Mass | EMR, MCL | MCL ≥ 2.0 |
+| Localization | mAP@IoU binary, avg over {0.1..0.5} | report |
+| Density | In-Event Cov@0.5, Peak Concentration | ≥ 0.6, ≤ 0.3 |
+| Semantic (reference only) | AUC2, logits2 avgMAP | no regression > 2 pp |
+| Reference | AUC1, AUC3 | log only |
+
+### Exp 6 (TBD)
+
+- [ ] Run full 5-epoch training: `python src/train.py --max-epoch 5 --lambda-mass 1.0 --lambda-density 0.5 --log-dir logs/phase_c_v1`
+- [ ] Record best MapScore + per-group metrics.
+- [ ] Compare against Exp 4 checkpoint on the same metric suite.

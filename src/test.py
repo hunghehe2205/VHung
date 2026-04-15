@@ -190,10 +190,9 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels,
         'ap': ap,
         'map_avg': bmap['map_avg'],
         'map_at_iou_01': bmap['map_at_iou_01'],
-        'map_at_iou_02': bmap['map_at_iou_02'],
         'map_at_iou_03': bmap['map_at_iou_03'],
-        'map_at_iou_04': bmap['map_at_iou_04'],
         'map_at_iou_05': bmap['map_at_iou_05'],
+        'map_at_iou_07': bmap['map_at_iou_07'],
         'mean_margin': mean_margin,
         'mean_intra_event_variance': mean_intra_var,
         'score_source': score_source,
@@ -205,16 +204,15 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels,
     print(f"  AP       = {ap:.4f}")
     print(f"  mAP AVG  = {bmap['map_avg']:.4f}  "
           f"(@0.1={bmap['map_at_iou_01']:.4f} @0.3={bmap['map_at_iou_03']:.4f} "
-          f"@0.5={bmap['map_at_iou_05']:.4f})")
+          f"@0.5={bmap['map_at_iou_05']:.4f} @0.7={bmap['map_at_iou_07']:.4f})")
     print(f"  [Diag] mean_margin={mean_margin:.4f}  mean_intra_event_var={mean_intra_var:.4f}")
 
     if logger:
         logger.info(
             f"[Eval src={score_source}] AUC={auc:.4f} AnoAUC={ano_auc:.4f} AP={ap:.4f} | "
             f"mAP_avg={bmap['map_avg']:.4f} "
-            f"@.1={bmap['map_at_iou_01']:.4f} @.2={bmap['map_at_iou_02']:.4f} "
-            f"@.3={bmap['map_at_iou_03']:.4f} @.4={bmap['map_at_iou_04']:.4f} "
-            f"@.5={bmap['map_at_iou_05']:.4f} | "
+            f"@.1={bmap['map_at_iou_01']:.4f} @.3={bmap['map_at_iou_03']:.4f} "
+            f"@.5={bmap['map_at_iou_05']:.4f} @.7={bmap['map_at_iou_07']:.4f} | "
             f"margin={mean_margin:.4f} intra_var={mean_intra_var:.4f}"
         )
 

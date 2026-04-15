@@ -127,7 +127,7 @@ def _average_precision(tp: np.ndarray, fp: np.ndarray, n_gt: int) -> float:
 
 def binary_detection_map(predictions: list,
                          gt_segments: list,
-                         iou_thresholds: tuple = (0.1, 0.2, 0.3, 0.4, 0.5),
+                         iou_thresholds: tuple = (0.1, 0.3, 0.5, 0.7),
                          nms_thresh: float = 0.6) -> dict:
     """Class-agnostic temporal detection mAP over a dataset of videos.
 

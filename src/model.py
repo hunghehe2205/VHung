@@ -66,6 +66,8 @@ class AnomalyMapHead(nn.Module):
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(dropout)
         self.conv2 = nn.Conv1d(hidden_dim, 1, kernel_size, padding=padding)
+        # Init output bias so sigmoid(bias) ≈ prior P(anomaly) ≈ 0.27 (matches HIVAU ETR stats).
+        nn.init.constant_(self.conv2.bias, -1.0)
 
     def forward(self, x):
         x = x.permute(0, 2, 1)  # (B, C, T)

@@ -43,6 +43,49 @@ def CLAS2(logits, labels, lengths, device):
     return clsloss
 
 
+def soft_iou_loss(probs, target, mask, eps=1e-6):
+    """Sequence-level soft temporal IoU loss.
+    probs: [B, T] in [0,1] — sigmoid(logits1).
+    target: [B, T] in {0,1} — y_bin.
+    mask: [B, T] bool — True for valid frames.
+    Returns scalar mean across batch.
+    """
+    mask_f = mask.float()
+    probs = probs * mask_f
+    target = target * mask_f
+    inter = (probs * target).sum(dim=-1)
+    union = probs.sum(dim=-1) + target.sum(dim=-1) - inter
+    iou = (inter + eps) / (union + eps)
+    return (1.0 - iou).mean()
+
+
+def frame_bce_loss(logits, target, mask, pos_weight):
+    """Frame-level binary BCE on logits1 with scalar pos_weight.
+    logits: [B, T] raw logits.
+    target: [B, T] {0,1}.
+    mask: [B, T] bool.
+    pos_weight: 1-D tensor [1].
+    """
+    logits_m = logits[mask]
+    target_m = target[mask]
+    return F.binary_cross_entropy_with_logits(
+        logits_m, target_m, pos_weight=pos_weight.to(logits_m.device))
+
+
+def get_lambda(epoch, phase1_epochs, phase2_epochs, lambda1, lambda2):
+    """3-phase schedule for extra losses.
+    epoch < phase1_epochs:                return (0, 0)       # MIL-only warmup
+    phase1_epochs <= epoch < phase2_epochs: return (lambda1, 0) # +frame BCE
+    epoch >= phase2_epochs:                return (lambda1, lambda2) # +IoU
+    """
+    if epoch < phase1_epochs:
+        return 0.0, 0.0
+    elif epoch < phase2_epochs:
+        return float(lambda1), 0.0
+    else:
+        return float(lambda1), float(lambda2)
+
+
 def train(model, normal_loader, anomaly_loader, testloader, args, label_map, device):
     model.to(device)
     gt = np.load(args.gt_path)

@@ -36,10 +36,17 @@ parser.add_argument('--beta-ramp-epochs', default=3, type=int,
                     help='Epochs over which beta linearly ramps 0 -> beta_max.')
 
 # D-Branch loss weights and hyperparameters
-parser.add_argument('--w-bce', default=1.0, type=float)
-parser.add_argument('--w-margin', default=0.5, type=float)
-parser.add_argument('--w-dice', default=0.5, type=float)
-parser.add_argument('--w-var', default=0.1, type=float)
+parser.add_argument('--w-bce', default=0.3, type=float,
+                    help='Anchor / break-symmetry signal; small weight so per-frame '
+                         'BCE does not push s_t into peaky extremes.')
+parser.add_argument('--w-dice', default=1.0, type=float,
+                    help='Primary segmentation objective (region IoU). Aligned with '
+                         'binary mAP@IoU evaluation metric.')
+parser.add_argument('--w-margin', default=0.5, type=float,
+                    help='Insurance for valley between event and background '
+                         '(largely redundant with Dice but useful in early epochs).')
+parser.add_argument('--w-var', default=0.1, type=float,
+                    help='Plateau / anti-spike regulariser within events.')
 parser.add_argument('--margin-m', default=0.3, type=float,
                     help='Valley margin in margin_loss.')
 parser.add_argument('--margin-temp', default=5.0, type=float,

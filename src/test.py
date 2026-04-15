@@ -20,6 +20,47 @@ LABEL_MAP = {
 }
 
 
+def _segments_to_mask(seg_list: list, length: int) -> np.ndarray:
+    """Convert [[start, end], ...] segments to a binary mask of given length."""
+    mask = np.zeros(length, dtype=bool)
+    for s, e in seg_list:
+        s = max(0, int(s))
+        e = min(length, int(e))
+        if e > s:
+            mask[s:e] = True
+    return mask
+
+
+def _per_video_diagnostics(score_clip: np.ndarray, seg_list_clip: list) -> dict:
+    """Per-video diagnostic stats, computed at clip resolution.
+
+    - margin = soft_min(s_in) - soft_max(s_out) (NaN if no event or no normal)
+    - intra_event_variances = list of Var(s_t) per contiguous event span (length >= 2)
+
+    seg_list_clip MUST already be in clip resolution (not raw frames).
+    """
+    score_clip = np.asarray(score_clip, dtype=np.float64)
+    mask = _segments_to_mask(seg_list_clip, score_clip.shape[0])
+
+    out = {'margin': float('nan'), 'intra_event_vars': []}
+
+    s_in = score_clip[mask]
+    s_out = score_clip[~mask]
+    if s_in.size > 0 and s_out.size > 0:
+        out['margin'] = float(s_in.min() - s_out.max())
+
+    # Find contiguous event spans for variance computation.
+    if mask.any():
+        padded = np.concatenate([[False], mask, [False]])
+        diff = np.diff(padded.astype(np.int8))
+        starts = np.where(diff == 1)[0]
+        ends = np.where(diff == -1)[0]
+        for a, b in zip(starts, ends):
+            if b - a >= 2:
+                out['intra_event_vars'].append(float(score_clip[a:b].var()))
+    return out
+
+
 def _ano_auc(gt_all: np.ndarray, prob_all: np.ndarray, video_lens: list, video_labels: list) -> float:
     """ROC-AUC restricted to frames belonging to anomaly videos.
 
@@ -67,6 +108,9 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels,
 
     all_concat_pred = []        # frame-resolution (×16) concatenated for AUC/AP
 
+    per_video_margins = []      # diagnostic: per-video min(s_in) - max(s_out)
+    all_intra_event_vars = []   # diagnostic: variance of s_t inside each event span
+
     with torch.no_grad():
         for i, item in enumerate(tqdm(testdataloader, desc='Testing')):
             visual = item[0].squeeze(0)
@@ -108,11 +152,17 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels,
 
             binary_preds.append(score_clip)
             seg_list = gtsegments[i] if gtsegments[i] is not None else []
-            binary_gt_segs.append([list(map(int, s)) for s in seg_list])
+            seg_list_clip = [list(map(int, s)) for s in seg_list]
+            binary_gt_segs.append(seg_list_clip)
             video_clip_lens.append(score_clip.shape[0])
             video_raw_lens.append(score_raw.shape[0])
             video_labels.append(label)
             all_concat_pred.append(score_raw)
+
+            diag = _per_video_diagnostics(score_clip, seg_list_clip)
+            if not np.isnan(diag['margin']):
+                per_video_margins.append(diag['margin'])
+            all_intra_event_vars.extend(diag['intra_event_vars'])
 
     pred_all = np.concatenate(all_concat_pred)
     # gt is the canonical raw-frame ground truth array.
@@ -131,6 +181,9 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels,
 
     bmap = binary_detection_map(binary_preds, binary_gt_segs)
 
+    mean_margin = float(np.mean(per_video_margins)) if per_video_margins else float('nan')
+    mean_intra_var = float(np.mean(all_intra_event_vars)) if all_intra_event_vars else float('nan')
+
     result = {
         'auc': auc,
         'ano_auc': ano_auc,
@@ -141,6 +194,8 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels,
         'map_at_iou_03': bmap['map_at_iou_03'],
         'map_at_iou_04': bmap['map_at_iou_04'],
         'map_at_iou_05': bmap['map_at_iou_05'],
+        'mean_margin': mean_margin,
+        'mean_intra_event_variance': mean_intra_var,
         'score_source': score_source,
     }
 
@@ -151,6 +206,7 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels,
     print(f"  mAP AVG  = {bmap['map_avg']:.4f}  "
           f"(@0.1={bmap['map_at_iou_01']:.4f} @0.3={bmap['map_at_iou_03']:.4f} "
           f"@0.5={bmap['map_at_iou_05']:.4f})")
+    print(f"  [Diag] mean_margin={mean_margin:.4f}  mean_intra_event_var={mean_intra_var:.4f}")
 
     if logger:
         logger.info(
@@ -158,7 +214,8 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels,
             f"mAP_avg={bmap['map_avg']:.4f} "
             f"@.1={bmap['map_at_iou_01']:.4f} @.2={bmap['map_at_iou_02']:.4f} "
             f"@.3={bmap['map_at_iou_03']:.4f} @.4={bmap['map_at_iou_04']:.4f} "
-            f"@.5={bmap['map_at_iou_05']:.4f}"
+            f"@.5={bmap['map_at_iou_05']:.4f} | "
+            f"margin={mean_margin:.4f} intra_var={mean_intra_var:.4f}"
         )
 
     return result

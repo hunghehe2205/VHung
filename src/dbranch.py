@@ -21,6 +21,11 @@ class DBranch(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.ln1 = nn.LayerNorm(hidden)
         self.ln2 = nn.LayerNorm(hidden // 2)
+        # Initialise output bias so sigmoid(bias) ≈ 0.27 ≈ event-time ratio of
+        # UCF-Crime. Random init makes D-Branch start far from any sensible
+        # prior, which forces BCE to spend its early gradient just shifting the
+        # global mean instead of shaping per-frame structure.
+        nn.init.constant_(self.conv3.bias, -1.0)
 
     def forward(self, x: torch.Tensor, padding_mask: torch.Tensor = None) -> torch.Tensor:
         x = x.transpose(1, 2)                          # (B, in_dim, T)

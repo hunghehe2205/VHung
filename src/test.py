@@ -27,7 +27,7 @@ LABEL_MAP = {
 
 
 def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels,
-         device, logger=None):
+         device, logger=None, score_source='prob3'):
     model.to(device)
     model.eval()
 
@@ -87,7 +87,14 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels,
             element_logits2 = np.repeat(element_logits2, 16, 0)
             element_logits2_stack.append(element_logits2)
 
-            score_map_np = np.repeat(prob3.cpu().numpy(), 16)
+            # Source of the anomaly map used to compute map-quality metrics.
+            # - 'prob3': trained map head (default, Phase C).
+            # - 'prob1': MIL head sigmoid (useful as baseline proxy for models
+            #            without a trained map_head, e.g. stock VadCLIP).
+            # - 'prob2': 1 - text-aligned 'normal' probability.
+            _source_lookup = {'prob1': prob1, 'prob2': prob2, 'prob3': prob3}
+            source_prob = _source_lookup[score_source]
+            score_map_np = np.repeat(source_prob.cpu().numpy(), 16)
             score_maps[f"video_{i:04d}_{label}"] = score_map_np
 
             # Per-video map metrics (uses frame-level gt slice + gt_segments[i]).
@@ -151,17 +158,18 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels,
     }
     map_score = composite_map_score(aggregated)
 
-    # Score distribution of logits3 across the entire test set — useful for
-    # spotting calibration issues (collapsed, saturated, or skewed maps).
-    all_prob3 = np.asarray(ap3, dtype=np.float64)
+    # Score distribution of the ACTIVE map source across the test set —
+    # spots calibration issues (collapsed, saturated, or skewed maps).
+    _dist_source = {'prob1': ap1, 'prob2': ap2, 'prob3': ap3}[score_source]
+    all_prob = np.asarray(_dist_source, dtype=np.float64)
     prob3_dist = {
-        'min': float(all_prob3.min()),
-        'p25': float(np.percentile(all_prob3, 25)),
-        'median': float(np.median(all_prob3)),
-        'p75': float(np.percentile(all_prob3, 75)),
-        'max': float(all_prob3.max()),
-        'mean': float(all_prob3.mean()),
-        'std': float(all_prob3.std()),
+        'min': float(all_prob.min()),
+        'p25': float(np.percentile(all_prob, 25)),
+        'median': float(np.median(all_prob)),
+        'p75': float(np.percentile(all_prob, 75)),
+        'max': float(all_prob.max()),
+        'mean': float(all_prob.mean()),
+        'std': float(all_prob.std()),
     }
 
     dmap, iou = dmAP(element_logits2_stack, gtsegments, gtlabels, excludeNormal=False)
@@ -172,14 +180,14 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels,
     averageMAP = averageMAP / 5
     print('  average MAP: {:.2f}'.format(averageMAP))
 
-    print("  --- Map Quality Metrics ---")
+    print(f"  --- Map Quality Metrics (source={score_source}) ---")
     print(f"  [Separation] Gap={gap_mean:.3f}  Normal-mean={normal_mean:.3f}")
     print(f"  [Mass]       MCL={mcl_mean:.3f}")
     print(f"  [Localize]   mAP@IoU avg={binary_map['map_avg']:.3f}  "
           f"@0.1={binary_map['map_at_iou_01']:.3f}  @0.5={binary_map['map_at_iou_05']:.3f}")
     print(f"  [Density]    InEventCov@0.5={cov05_mean:.3f}  InEventCov@0.3={cov03_mean:.3f}  "
           f"PeakConc={pc_mean:.3f}  Entropy={entropy_mean:.3f}")
-    print(f"  [Dist p3]    min={prob3_dist['min']:.3f} p25={prob3_dist['p25']:.3f} "
+    print(f"  [Dist {score_source}] min={prob3_dist['min']:.3f} p25={prob3_dist['p25']:.3f} "
           f"med={prob3_dist['median']:.3f} p75={prob3_dist['p75']:.3f} "
           f"max={prob3_dist['max']:.3f}  (mean={prob3_dist['mean']:.3f}±{prob3_dist['std']:.3f})")
     print(f"  [Composite]  MapScore={map_score:.4f}")
@@ -215,7 +223,16 @@ if __name__ == '__main__':
     model = CLIPVAD(args.classes_num, args.embed_dim, args.visual_length, args.visual_width,
                     args.visual_head, args.visual_layers, args.attn_window,
                     args.prompt_prefix, args.prompt_postfix, device)
-    model.load_state_dict(torch.load(args.model_path, weights_only=False))
+    # strict=False allows loading stock VadCLIP checkpoints that predate the
+    # AnomalyMapHead; pair with --score-source prob1 for a fair baseline map comparison.
+    missing, unexpected = model.load_state_dict(
+        torch.load(args.model_path, weights_only=False), strict=False)
+    if missing:
+        print(f"[load] missing keys (will use random init): {missing[:5]}"
+              f"{' ...' if len(missing) > 5 else ''}")
+    if unexpected:
+        print(f"[load] unexpected keys (ignored): {unexpected[:5]}"
+              f"{' ...' if len(unexpected) > 5 else ''}")
 
     import logging
     logger = logging.getLogger('logits3')
@@ -227,7 +244,8 @@ if __name__ == '__main__':
         logger.setLevel(logging.INFO)
 
     _, _, _, _, score_maps, _, _ = test(model, testdataloader, args.visual_length, prompt_text,
-                                        gt, gtsegments, gtlabels, device, logger)
+                                        gt, gtsegments, gtlabels, device, logger,
+                                        score_source=args.score_source)
 
     maps_dir = os.path.join(args.log_dir, 'score_maps')
     os.makedirs(maps_dir, exist_ok=True)

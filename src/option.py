@@ -40,4 +40,7 @@ parser.add_argument('--lambda-density', default=0.5, type=float)
 parser.add_argument('--mass-margin', default=0.3, type=float)
 parser.add_argument('--log-dir', default='logs')
 parser.add_argument('--smooth-sigma', default=1.5, type=float)
+parser.add_argument('--score-source', default='prob3', choices=['prob1', 'prob2', 'prob3'],
+                    help='Which head to treat as the anomaly map for map-quality metrics. '
+                         'Use prob1 for stock VadCLIP baseline comparison; prob3 for Phase C.')
 

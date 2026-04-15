@@ -123,6 +123,39 @@ def map_mass_ratio_loss(logits3, raw_mask, lengths, margin=0.3, eps=1e-8):
     return total_loss / total_count
 
 
+def map_density_loss(logits3, raw_mask, lengths, eps=1e-8):
+    """Drive inside-event distribution toward uniform (max normalized entropy).
+
+    p̂[t] = s_t / Σ_event s_t; H = -Σ p̂ log p̂; H_norm = H / log(L_event).
+    Loss = 1 - H_norm. Zero when in-event mass is uniform; 1 when fully spiky.
+    """
+    import math
+    scores = torch.sigmoid(logits3.squeeze(-1))
+    total_loss = 0.0
+    total_count = 0
+    for i in range(scores.shape[0]):
+        L = int(lengths[i].item())
+        if L == 0:
+            continue
+        s = scores[i, :L]
+        m = raw_mask[i, :L]
+        in_event = m > 0.5
+        L_event = int(in_event.sum().item())
+        if L_event <= 1:
+            continue
+        event_scores = s[in_event]
+        total_event = event_scores.sum() + eps
+        p = event_scores / total_event
+        p_safe = torch.clamp(p, min=eps)
+        H = -(p * torch.log(p_safe)).sum()
+        H_norm = H / math.log(L_event)
+        total_loss = total_loss + (1.0 - H_norm)
+        total_count += 1
+    if total_count == 0:
+        return torch.tensor(0.0, device=logits3.device, requires_grad=True)
+    return total_loss / total_count
+
+
 def map_coverage_loss(logits3, raw_mask, lengths, threshold=0.5):
     """Push anomaly frame scores above threshold."""
     scores = torch.sigmoid(logits3.squeeze(-1))

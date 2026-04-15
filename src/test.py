@@ -1,20 +1,14 @@
 import os
 import torch
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
 import numpy as np
+from torch.utils.data import DataLoader
 from sklearn.metrics import average_precision_score, roc_auc_score
 from tqdm import tqdm
 
 from model import CLIPVAD
 from utils.dataset import UCFDataset
 from utils.tools import get_batch_mask, get_prompt_text
-from utils.detection_map import getDetectionMAP as dmAP
-from utils.map_metrics import (
-    compute_per_video_metrics,
-    binary_detection_map,
-    composite_map_score,
-)
+from utils.map_metrics import binary_detection_map
 import option
 
 LABEL_MAP = {
@@ -26,18 +20,52 @@ LABEL_MAP = {
 }
 
 
+def _ano_auc(gt_all: np.ndarray, prob_all: np.ndarray, video_lens: list, video_labels: list) -> float:
+    """ROC-AUC restricted to frames belonging to anomaly videos.
+
+    A video is "anomaly" if its label is not 'Normal'. For mixed-frame AUC
+    on this subset, normal frames inside an anomaly video still count as
+    negatives (their gt is 0 wherever they're not in events).
+    """
+    assert len(video_lens) == len(video_labels)
+    cursor = 0
+    anomaly_gt_chunks = []
+    anomaly_prob_chunks = []
+    for L, lab in zip(video_lens, video_labels):
+        seg_gt = gt_all[cursor: cursor + L]
+        seg_p = prob_all[cursor: cursor + L]
+        cursor += L
+        if lab != 'Normal':
+            anomaly_gt_chunks.append(seg_gt)
+            anomaly_prob_chunks.append(seg_p)
+    if not anomaly_gt_chunks:
+        return float('nan')
+    g = np.concatenate(anomaly_gt_chunks)
+    p = np.concatenate(anomaly_prob_chunks)
+    if g.sum() == 0 or g.sum() == len(g):
+        return float('nan')
+    return float(roc_auc_score(g, p))
+
+
 def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels,
-         device, logger=None, score_source='prob3'):
+         device, logger=None, score_source='dbranch'):
+    """Evaluate model on UCF test set.
+
+    Reports AUC, Ano-AUC, AP at frame level (16x repeat to match raw frames)
+    and Binary mAP@IoU class-agnostic at segment level.
+
+    Returns a dict with keys: auc, ano_auc, ap, map_avg, map_at_iou_0X (for X in 1..5).
+    """
     model.to(device)
     model.eval()
 
-    element_logits2_stack = []
-    score_maps = {}
+    binary_preds = []           # list of frame-level prob arrays per video (clip resolution)
+    binary_gt_segs = []         # list of [[start, end], ...] per video
+    video_clip_lens = []        # length in clips (matches binary_preds[i].shape[0])
+    video_raw_lens = []         # length × 16 to slice gt
+    video_labels = []           # per-video label string
 
-    per_video_metrics = []
-    binary_preds = []      # list of frame-level prob3 arrays
-    binary_gt_segs = []    # list of [[start, end], ...]
-    video_start = 0        # running index into `gt` array
+    all_concat_pred = []        # frame-resolution (×16) concatenated for AUC/AP
 
     with torch.no_grad():
         for i, item in enumerate(tqdm(testdataloader, desc='Testing')):
@@ -65,147 +93,75 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels,
             lengths = lengths.to(int)
             padding_mask = get_batch_mask(lengths, maxlen).to(device)
 
-            _, logits1, logits2, logits3 = model(visual, padding_mask, prompt_text, lengths)
-            logits1 = logits1.reshape(logits1.shape[0] * logits1.shape[1], logits1.shape[2])
-            logits2 = logits2.reshape(logits2.shape[0] * logits2.shape[1], logits2.shape[2])
-            logits3 = logits3.reshape(logits3.shape[0] * logits3.shape[1], logits3.shape[2])
+            _, logits1, logits2, s_t = model(visual, padding_mask, prompt_text, lengths)
+            logits1 = logits1.reshape(-1, logits1.shape[-1])
+            logits2 = logits2.reshape(-1, logits2.shape[-1])
+            s_t = s_t.reshape(-1)
 
-            prob2 = (1 - logits2[0:len_cur].softmax(dim=-1)[:, 0].squeeze(-1))
             prob1 = torch.sigmoid(logits1[0:len_cur].squeeze(-1))
-            prob3 = torch.sigmoid(logits3[0:len_cur].squeeze(-1))
+            prob2 = (1 - logits2[0:len_cur].softmax(dim=-1)[:, 0])
+            prob_d = s_t[0:len_cur]
 
-            if i == 0:
-                ap1 = prob1
-                ap2 = prob2
-                ap3 = prob3
-            else:
-                ap1 = torch.cat([ap1, prob1], dim=0)
-                ap2 = torch.cat([ap2, prob2], dim=0)
-                ap3 = torch.cat([ap3, prob3], dim=0)
+            source = {'prob1': prob1, 'prob2': prob2, 'dbranch': prob_d}[score_source]
+            score_clip = source.detach().cpu().numpy().astype(np.float64)
+            score_raw = np.repeat(score_clip, 16)
 
-            element_logits2 = logits2[0:len_cur].softmax(dim=-1).detach().cpu().numpy()
-            element_logits2 = np.repeat(element_logits2, 16, 0)
-            element_logits2_stack.append(element_logits2)
-
-            # Source of the anomaly map used to compute map-quality metrics.
-            # - 'prob3': trained map head (default, Phase C).
-            # - 'prob1': MIL head sigmoid (useful as baseline proxy for models
-            #            without a trained map_head, e.g. stock VadCLIP).
-            # - 'prob2': 1 - text-aligned 'normal' probability.
-            _source_lookup = {'prob1': prob1, 'prob2': prob2, 'prob3': prob3}
-            source_prob = _source_lookup[score_source]
-            score_map_np = np.repeat(source_prob.cpu().numpy(), 16)
-            score_maps[f"video_{i:04d}_{label}"] = score_map_np
-
-            # Per-video map metrics (uses frame-level gt slice + gt_segments[i]).
-            video_len_frames = score_map_np.shape[0]
-            gt_slice = np.asarray(gt[video_start: video_start + video_len_frames], dtype=np.float32)
-            video_start += video_len_frames
-
-            metrics_i = compute_per_video_metrics(score_map_np, gt_slice)
-            per_video_metrics.append(metrics_i)
-            binary_preds.append(score_map_np)
+            binary_preds.append(score_clip)
             seg_list = gtsegments[i] if gtsegments[i] is not None else []
             binary_gt_segs.append([list(map(int, s)) for s in seg_list])
+            video_clip_lens.append(score_clip.shape[0])
+            video_raw_lens.append(score_raw.shape[0])
+            video_labels.append(label)
+            all_concat_pred.append(score_raw)
 
-    ap1 = ap1.cpu().numpy().tolist()
-    ap2 = ap2.cpu().numpy().tolist()
-    ap3 = ap3.cpu().numpy().tolist()
+    pred_all = np.concatenate(all_concat_pred)
+    # gt is the canonical raw-frame ground truth array.
+    gt_all = np.asarray(gt[: pred_all.shape[0]], dtype=np.float32)
+    if pred_all.shape[0] != gt.shape[0]:
+        # The split path may produce a slightly different total length when a
+        # video's clip count isn't a multiple of maxlen. Trim to common length
+        # so AUC/AP remain well-defined.
+        n = min(pred_all.shape[0], gt.shape[0])
+        pred_all = pred_all[:n]
+        gt_all = np.asarray(gt[:n], dtype=np.float32)
 
-    ROC1 = roc_auc_score(gt, np.repeat(ap1, 16))
-    AP1 = average_precision_score(gt, np.repeat(ap1, 16))
-    ROC2 = roc_auc_score(gt, np.repeat(ap2, 16))
-    AP2 = average_precision_score(gt, np.repeat(ap2, 16))
-    ROC3 = roc_auc_score(gt, np.repeat(ap3, 16))
-    AP3 = average_precision_score(gt, np.repeat(ap3, 16))
+    auc = float(roc_auc_score(gt_all, pred_all))
+    ap = float(average_precision_score(gt_all, pred_all))
+    ano_auc = _ano_auc(gt_all, pred_all, video_raw_lens, video_labels)
 
-    print(f"  AUC1: {ROC1:.4f}  AP1: {AP1:.4f}  (logits1 - baseline)")
-    print(f"  AUC3: {ROC3:.4f}  AP3: {AP3:.4f}  (logits3 - map head)")
-    print(f"  AUC2: {ROC2:.4f}  AP2: {AP2:.4f}  (logits2 - text align)")
+    bmap = binary_detection_map(binary_preds, binary_gt_segs)
 
-    # Aggregate per-video metrics. Use nan-aware mean for metrics defined only on anomaly videos.
-    def _nanmean_key(key):
-        vals = [m[key] for m in per_video_metrics if not (isinstance(m[key], float) and np.isnan(m[key]))]
-        return float(np.mean(vals)) if vals else float('nan')
-
-    gap_mean = _nanmean_key('gap')
-    mcl_mean = _nanmean_key('mcl')
-    pc_mean = _nanmean_key('peak_concentration')
-    cov05_mean = _nanmean_key('in_event_cov_05')
-    cov03_mean = _nanmean_key('in_event_cov_03')
-    entropy_mean = _nanmean_key('in_event_entropy')
-
-    # Normal-mean: averaged on videos with no events (gtsegments[i] empty).
-    normal_means = []
-    for i, m in enumerate(per_video_metrics):
-        if len(binary_gt_segs[i]) == 0:
-            normal_means.append(m['out_mean'])
-    normal_mean = float(np.mean(normal_means)) if normal_means else float('nan')
-
-    binary_map = binary_detection_map(binary_preds, binary_gt_segs)
-
-    aggregated = {
-        'gap': gap_mean,
-        'mcl': mcl_mean,
-        'peak_concentration': pc_mean,
-        'map_avg': binary_map['map_avg'],
-        'map_at_iou_01': binary_map['map_at_iou_01'],
-        'map_at_iou_05': binary_map['map_at_iou_05'],
-        'in_event_cov_05': cov05_mean,
-        'in_event_cov_03': cov03_mean,
-        'in_event_entropy': entropy_mean,
-        'normal_mean': normal_mean,
-    }
-    map_score = composite_map_score(aggregated)
-
-    # Score distribution of the ACTIVE map source across the test set —
-    # spots calibration issues (collapsed, saturated, or skewed maps).
-    _dist_source = {'prob1': ap1, 'prob2': ap2, 'prob3': ap3}[score_source]
-    all_prob = np.asarray(_dist_source, dtype=np.float64)
-    prob3_dist = {
-        'min': float(all_prob.min()),
-        'p25': float(np.percentile(all_prob, 25)),
-        'median': float(np.median(all_prob)),
-        'p75': float(np.percentile(all_prob, 75)),
-        'max': float(all_prob.max()),
-        'mean': float(all_prob.mean()),
-        'std': float(all_prob.std()),
+    result = {
+        'auc': auc,
+        'ano_auc': ano_auc,
+        'ap': ap,
+        'map_avg': bmap['map_avg'],
+        'map_at_iou_01': bmap['map_at_iou_01'],
+        'map_at_iou_02': bmap['map_at_iou_02'],
+        'map_at_iou_03': bmap['map_at_iou_03'],
+        'map_at_iou_04': bmap['map_at_iou_04'],
+        'map_at_iou_05': bmap['map_at_iou_05'],
+        'score_source': score_source,
     }
 
-    dmap, iou = dmAP(element_logits2_stack, gtsegments, gtlabels, excludeNormal=False)
-    averageMAP = 0
-    for k in range(5):
-        print('  mAP@{0:.1f} ={1:.2f}%'.format(iou[k], dmap[k]))
-        averageMAP += dmap[k]
-    averageMAP = averageMAP / 5
-    print('  average MAP: {:.2f}'.format(averageMAP))
-
-    print(f"  --- Map Quality Metrics (source={score_source}) ---")
-    print(f"  [Separation] Gap={gap_mean:.3f}  Normal-mean={normal_mean:.3f}")
-    print(f"  [Mass]       MCL={mcl_mean:.3f}")
-    print(f"  [Localize]   mAP@IoU avg={binary_map['map_avg']:.3f}  "
-          f"@0.1={binary_map['map_at_iou_01']:.3f}  @0.5={binary_map['map_at_iou_05']:.3f}")
-    print(f"  [Density]    InEventCov@0.5={cov05_mean:.3f}  InEventCov@0.3={cov03_mean:.3f}  "
-          f"PeakConc={pc_mean:.3f}  Entropy={entropy_mean:.3f}")
-    print(f"  [Dist {score_source}] min={prob3_dist['min']:.3f} p25={prob3_dist['p25']:.3f} "
-          f"med={prob3_dist['median']:.3f} p75={prob3_dist['p75']:.3f} "
-          f"max={prob3_dist['max']:.3f}  (mean={prob3_dist['mean']:.3f}±{prob3_dist['std']:.3f})")
-    print(f"  [Composite]  MapScore={map_score:.4f}")
+    print(f"  [Eval source={score_source}]")
+    print(f"  AUC      = {auc:.4f}")
+    print(f"  Ano-AUC  = {ano_auc:.4f}")
+    print(f"  AP       = {ap:.4f}")
+    print(f"  mAP AVG  = {bmap['map_avg']:.4f}  "
+          f"(@0.1={bmap['map_at_iou_01']:.4f} @0.3={bmap['map_at_iou_03']:.4f} "
+          f"@0.5={bmap['map_at_iou_05']:.4f})")
 
     if logger:
         logger.info(
-            f"[Eval] AUC1={ROC1:.4f} AP1={AP1:.4f} | "
-            f"AUC3={ROC3:.4f} AP3={AP3:.4f} | "
-            f"AUC2={ROC2:.4f} AP2={AP2:.4f} | "
-            f"avgMAP={averageMAP:.2f}")
-        logger.info(
-            f"[MapEval] Gap={gap_mean:.3f} NormMean={normal_mean:.3f} MCL={mcl_mean:.3f} "
-            f"mAPavg={binary_map['map_avg']:.3f} InCov05={cov05_mean:.3f} "
-            f"PC={pc_mean:.3f} Entropy={entropy_mean:.3f} MapScore={map_score:.4f} | "
-            f"p3_med={prob3_dist['median']:.3f} p3_mean={prob3_dist['mean']:.3f}±{prob3_dist['std']:.3f}"
+            f"[Eval src={score_source}] AUC={auc:.4f} AnoAUC={ano_auc:.4f} AP={ap:.4f} | "
+            f"mAP_avg={bmap['map_avg']:.4f} "
+            f"@.1={bmap['map_at_iou_01']:.4f} @.2={bmap['map_at_iou_02']:.4f} "
+            f"@.3={bmap['map_at_iou_03']:.4f} @.4={bmap['map_at_iou_04']:.4f} "
+            f"@.5={bmap['map_at_iou_05']:.4f}"
         )
 
-    return ROC1, AP1, ROC3, AP3, score_maps, map_score, aggregated
+    return result
 
 
 if __name__ == '__main__':
@@ -223,31 +179,24 @@ if __name__ == '__main__':
     model = CLIPVAD(args.classes_num, args.embed_dim, args.visual_length, args.visual_width,
                     args.visual_head, args.visual_layers, args.attn_window,
                     args.prompt_prefix, args.prompt_postfix, device)
-    # strict=False allows loading stock VadCLIP checkpoints that predate the
-    # AnomalyMapHead; pair with --score-source prob1 for a fair baseline map comparison.
+    # strict=False so stock VadCLIP checkpoints (no d_branch) load with random head;
+    # pair with --score-source prob1 to reproduce the baseline AUC/Ano-AUC/mAP.
     missing, unexpected = model.load_state_dict(
-        torch.load(args.model_path, weights_only=False), strict=False)
+        torch.load(args.model_path, weights_only=False, map_location=device), strict=False)
     if missing:
-        print(f"[load] missing keys (will use random init): {missing[:5]}"
-              f"{' ...' if len(missing) > 5 else ''}")
+        print(f"[load] missing keys (random init): {missing[:8]}{' ...' if len(missing) > 8 else ''}")
     if unexpected:
-        print(f"[load] unexpected keys (ignored): {unexpected[:5]}"
-              f"{' ...' if len(unexpected) > 5 else ''}")
+        print(f"[load] unexpected keys (ignored): {unexpected[:8]}{' ...' if len(unexpected) > 8 else ''}")
 
     import logging
-    logger = logging.getLogger('logits3')
+    logger = logging.getLogger('dbranch')
     if not logger.handlers:
         os.makedirs(args.log_dir, exist_ok=True)
-        fh = logging.FileHandler(os.path.join(args.log_dir, 'train.log'), mode='a')
+        fh = logging.FileHandler(os.path.join(args.log_dir, 'test.log'), mode='a')
         fh.setFormatter(logging.Formatter('[%(asctime)s] %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
         logger.addHandler(fh)
         logger.setLevel(logging.INFO)
 
-    _, _, _, _, score_maps, _, _ = test(model, testdataloader, args.visual_length, prompt_text,
-                                        gt, gtsegments, gtlabels, device, logger,
-                                        score_source=args.score_source)
-
-    maps_dir = os.path.join(args.log_dir, 'score_maps')
-    os.makedirs(maps_dir, exist_ok=True)
-    for name, smap in score_maps.items():
-        np.save(os.path.join(maps_dir, f"{name}.npy"), smap)
+    test(model, testdataloader, args.visual_length, prompt_text,
+         gt, gtsegments, gtlabels, device, logger,
+         score_source=args.score_source)

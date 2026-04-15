@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from torch import nn
 from clip import clip
 from utils.layers import GraphConvolution, DistanceAdj
+from dbranch import DBranch
 
 
 class LayerNorm(nn.LayerNorm):
@@ -56,29 +57,6 @@ class Transformer(nn.Module):
         return self.resblocks(x)
 
 
-class AnomalyMapHead(nn.Module):
-    """Anomaly map head. Produces frame-level anomaly scores from visual features."""
-
-    def __init__(self, in_dim, hidden_dim=256, kernel_size=7, dropout=0.3):
-        super().__init__()
-        padding = kernel_size // 2
-        self.conv1 = nn.Conv1d(in_dim, hidden_dim, kernel_size, padding=padding)
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(dropout)
-        self.conv2 = nn.Conv1d(hidden_dim, 1, kernel_size, padding=padding)
-        # Init output bias so sigmoid(bias) ≈ prior P(anomaly) ≈ 0.27 (matches HIVAU ETR stats).
-        nn.init.constant_(self.conv2.bias, -1.0)
-
-    def forward(self, x):
-        x = x.permute(0, 2, 1)  # (B, C, T)
-        x = self.conv1(x)
-        x = self.relu(x)
-        x = self.dropout(x)
-        x = self.conv2(x)
-        x = x.permute(0, 2, 1)  # (B, T, 1)
-        return x
-
-
 class CLIPVAD(nn.Module):
     def __init__(self, num_class, embed_dim, visual_length, visual_width,
                  visual_head, visual_layers, attn_window, prompt_prefix,
@@ -121,7 +99,7 @@ class CLIPVAD(nn.Module):
             ("c_proj", nn.Linear(visual_width * 4, visual_width))
         ]))
         self.classifier = nn.Linear(visual_width, 1)
-        self.map_head = AnomalyMapHead(visual_width)
+        self.d_branch = DBranch(in_dim=visual_width)
 
         self.clipmodel, _ = clip.load("ViT-B/16", device)
         for clip_param in self.clipmodel.parameters():
@@ -227,6 +205,6 @@ class CLIPVAD(nn.Module):
         text_features_norm = text_features_norm.permute(0, 2, 1)
         logits2 = visual_features_norm @ text_features_norm.type(visual_features_norm.dtype) / 0.07
 
-        logits3 = self.map_head(visual_features)  # NO detach - gradient flows back
+        s_t = self.d_branch(visual_features, padding_mask)
 
-        return text_features_ori, logits1, logits2, logits3
+        return text_features_ori, logits1, logits2, s_t

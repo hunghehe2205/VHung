@@ -90,3 +90,110 @@ def density_stats(scores: np.ndarray, mask: np.ndarray,
     H = float(-(p * np.log(p_safe)).sum())
     out['in_event_entropy'] = float(H / math.log(L)) if L > 1 else 0.0
     return out
+
+
+from .detection_map import nms as _nms  # reuse existing NMS
+
+
+def _extract_segments(score: np.ndarray, thresholds=(0.3, 0.5, 0.7), min_length: int = 2):
+    """Threshold a 1-D score array at several levels; produce candidate segments.
+
+    Returns list of [start, end, score].
+    """
+    segments = []
+    for thr in thresholds:
+        mask = (score > thr).astype(np.int8)
+        padded = np.concatenate([[0], mask, [0]])
+        diff = np.diff(padded)
+        starts = np.where(diff == 1)[0]
+        ends = np.where(diff == -1)[0]
+        for s, e in zip(starts, ends):
+            if e - s >= min_length:
+                seg_score = float(score[s:e].max())
+                segments.append([int(s), int(e), seg_score])
+    return segments
+
+
+def _average_precision(tp: np.ndarray, fp: np.ndarray, n_gt: int) -> float:
+    if n_gt == 0:
+        return 0.0
+    tp_c = np.cumsum(tp)
+    fp_c = np.cumsum(fp)
+    precision = tp_c / (tp_c + fp_c + 1e-12)
+    # VOC-style: Σ (precision_at_tp) / n_gt
+    ap = float((precision * tp).sum() / n_gt)
+    return ap
+
+
+def binary_detection_map(predictions: list,
+                         gt_segments: list,
+                         iou_thresholds: tuple = (0.1, 0.2, 0.3, 0.4, 0.5),
+                         nms_thresh: float = 0.6) -> dict:
+    """Class-agnostic temporal detection mAP over a dataset of videos.
+
+    Args:
+        predictions: list length V of 1-D numpy arrays (frame-level or snippet-level scores).
+        gt_segments: list length V. gt_segments[i] is iterable of [start, end] pairs
+                     (same frame domain as predictions[i]). Empty list means no events.
+        iou_thresholds: IoU levels at which to compute AP.
+        nms_thresh: IoU threshold for NMS between multi-threshold candidates.
+
+    Returns:
+        dict with 'map_at_iou_{XX}' for each threshold plus 'map_avg'.
+    """
+    # Collect all candidate segments across videos.
+    all_preds = []  # [video_idx, start, end, score]
+    for i, score in enumerate(predictions):
+        score = np.asarray(score, dtype=np.float64)
+        segs = _extract_segments(score)
+        if len(segs) == 0:
+            continue
+        segs_arr = np.array(segs)
+        segs_arr = segs_arr[np.argsort(-segs_arr[:, -1])]
+        _, keep = _nms(segs_arr[:, :2], thresh=nms_thresh)
+        for k in keep:
+            all_preds.append([i, int(segs_arr[k, 0]), int(segs_arr[k, 1]), float(segs_arr[k, 2])])
+
+    n_gt_total = sum(len(g) for g in gt_segments)
+    result = {}
+    if n_gt_total == 0:
+        for thr in iou_thresholds:
+            result[f'map_at_iou_{int(thr*10):02d}'] = float('nan')
+        result['map_avg'] = float('nan')
+        return result
+
+    if len(all_preds) == 0:
+        for thr in iou_thresholds:
+            result[f'map_at_iou_{int(thr*10):02d}'] = 0.0
+        result['map_avg'] = 0.0
+        return result
+
+    all_preds.sort(key=lambda x: -x[3])
+
+    aps = []
+    for iou_thr in iou_thresholds:
+        # Track matched GT per video
+        remaining_gt = [list(map(list, g)) for g in gt_segments]
+        tp = np.zeros(len(all_preds))
+        fp = np.zeros(len(all_preds))
+        for idx, (vi, ps, pe, _score) in enumerate(all_preds):
+            best_iou = 0.0
+            best_gi = -1
+            for gi, (gs, ge) in enumerate(remaining_gt[vi]):
+                inter = max(0, min(pe, ge) - max(ps, gs))
+                union = max(pe, ge) - min(ps, gs)
+                iou = inter / union if union > 0 else 0.0
+                if iou > best_iou:
+                    best_iou = iou
+                    best_gi = gi
+            if best_iou >= iou_thr and best_gi >= 0:
+                tp[idx] = 1.0
+                remaining_gt[vi].pop(best_gi)
+            else:
+                fp[idx] = 1.0
+        ap = _average_precision(tp, fp, n_gt_total)
+        aps.append(ap)
+        result[f'map_at_iou_{int(iou_thr*10):02d}'] = ap
+
+    result['map_avg'] = float(np.mean(aps))
+    return result

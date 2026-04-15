@@ -101,3 +101,36 @@ def test_density_normal_video():
     assert np.isnan(d['peak_concentration'])
     assert np.isnan(d['in_event_entropy'])
     assert np.isnan(d['in_event_cov_05'])
+
+
+from src.utils.map_metrics import binary_detection_map
+
+
+def test_binary_detection_map_perfect():
+    # 2 videos; each has one event. Predictions match exactly.
+    predictions = [
+        np.concatenate([np.zeros(40), np.ones(20), np.zeros(40)]),
+        np.concatenate([np.zeros(10), np.ones(30), np.zeros(60)]),
+    ]
+    gt_segments = [
+        [[40, 60]],
+        [[10, 40]],
+    ]
+    result = binary_detection_map(predictions, gt_segments)
+    assert result['map_avg'] >= 0.99
+    assert result['map_at_iou_05'] >= 0.99
+
+
+def test_binary_detection_map_all_wrong():
+    predictions = [np.zeros(100), np.zeros(100)]
+    gt_segments = [[[40, 60]], [[10, 40]]]
+    result = binary_detection_map(predictions, gt_segments)
+    assert result['map_avg'] == pytest.approx(0.0)
+
+
+def test_binary_detection_map_single_spike():
+    # Spike at frame 50 inside GT [40,60] → IoU ≈ 1/20 = 0.05
+    pred = np.zeros(100); pred[50] = 1.0
+    result = binary_detection_map([pred], [[[40, 60]]])
+    # At IoU >= 0.1, prediction matches nothing → mAP=0
+    assert result['map_at_iou_01'] == pytest.approx(0.0)

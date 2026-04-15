@@ -73,3 +73,46 @@ def process_split(feat, length):
             else:
                 split_feat = np.concatenate([split_feat, chunk], axis=0)
         return split_feat, clip_length
+
+
+def build_frame_labels(events_sec, fps, n_features, clip_len=16, target_len=256):
+    """
+    Build binary per-feature anomaly labels of shape [target_len].
+
+    events_sec: iterable of (start_sec, end_sec) tuples (possibly empty).
+    fps: frames-per-second of the source video.
+    n_features: number of features actually present in the loaded file.
+    clip_len: frames per feature (default 16, matching feature extractor stride).
+    target_len: final length after pad/truncate (e.g. visual_length=256).
+
+    Rule: any-overlap between feature window [i*clip_len, (i+1)*clip_len)
+          and any event (in frame space) marks label 1.
+
+    When n_features > target_len, downsamples via MAX (preserves any-overlap).
+    When n_features < target_len, pads with zeros (normal).
+    """
+    events_frame = [(float(s) * fps, float(e) * fps) for s, e in events_sec]
+    y_raw = np.zeros(n_features, dtype=np.float32)
+    for i in range(n_features):
+        ws = i * clip_len
+        we = (i + 1) * clip_len
+        for s, e in events_frame:
+            if we > s and ws < e:  # overlap
+                y_raw[i] = 1.0
+                break
+
+    if n_features >= target_len:
+        # Uniform-MAX downsample to target_len (matches uniform_extract layout)
+        r = np.linspace(0, n_features, target_len + 1, dtype=np.int32)
+        y = np.zeros(target_len, dtype=np.float32)
+        for i in range(target_len):
+            lo, hi = r[i], r[i + 1]
+            if lo == hi:
+                y[i] = y_raw[lo] if lo < n_features else 0.0
+            else:
+                y[i] = y_raw[lo:hi].max()
+        return y
+    else:
+        y = np.zeros(target_len, dtype=np.float32)
+        y[:n_features] = y_raw
+        return y

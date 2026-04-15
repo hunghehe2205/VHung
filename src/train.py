@@ -156,49 +156,6 @@ def map_density_loss(logits3, raw_mask, lengths, eps=1e-8):
     return total_loss / total_count
 
 
-def map_coverage_loss(logits3, raw_mask, lengths, threshold=0.5):
-    """Push anomaly frame scores above threshold."""
-    scores = torch.sigmoid(logits3.squeeze(-1))
-    total_loss = 0.0
-    total_count = 0
-    for i in range(scores.shape[0]):
-        L = int(lengths[i].item())
-        if L == 0:
-            continue
-        s = scores[i, :L]
-        m = raw_mask[i, :L]
-        anom_mask = m > 0.5
-        if anom_mask.any():
-            shortfall = F.relu(threshold - s[anom_mask])
-            total_loss += shortfall.sum()
-            total_count += anom_mask.sum().item()
-    if total_count == 0:
-        return torch.tensor(0.0, device=logits3.device, requires_grad=True)
-    return total_loss / total_count
-
-
-def map_ranking_loss(logits3, raw_mask, lengths, margin=0.3):
-    """Ensure max(anomaly) - max(normal) > margin per sample."""
-    scores = torch.sigmoid(logits3.squeeze(-1))
-    total_loss = 0.0
-    total_count = 0
-    for i in range(scores.shape[0]):
-        L = int(lengths[i].item())
-        if L == 0:
-            continue
-        s = scores[i, :L]
-        m = raw_mask[i, :L]
-        anom_mask = m > 0.5
-        norm_mask = m < 0.5
-        if anom_mask.any() and norm_mask.any():
-            max_anom = s[anom_mask].max()
-            max_norm = s[norm_mask].max()
-            total_loss += F.relu(margin - (max_anom - max_norm))
-            total_count += 1
-    if total_count == 0:
-        return torch.tensor(0.0, device=logits3.device, requires_grad=True)
-    return total_loss / total_count
-
 
 def compute_map_stats(logits3, raw_mask, lengths):
     scores = torch.sigmoid(logits3.squeeze(-1)).detach()
@@ -240,7 +197,6 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
     logger = setup_logging(args.log_dir)
     log_metrics(logger, f"=== Training started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
     log_metrics(logger, f"lambda_bce={args.lambda_bce} lambda_smooth={args.lambda_smooth} "
-                        f"lambda_cov={args.lambda_coverage} lambda_rank={args.lambda_ranking} "
                         f"smooth_sigma={args.smooth_sigma} lr={args.lr} epochs={args.max_epoch} "
                         f"detach=False")
 
@@ -267,8 +223,6 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         loss_total3 = 0
         loss_total_bce = 0
         loss_total_smooth = 0
-        loss_total_cov = 0
-        loss_total_rank = 0
         epoch_map_stats = {'anomaly_mean': 0, 'normal_mean': 0, 'gap': 0, 'coverage': 0}
         stat_count = 0
 
@@ -308,16 +262,11 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
 
             l_bce = map_bce_loss(logits3, soft_mask_batch, feat_lengths)
             l_smooth = map_smooth_loss(logits3, raw_mask_batch, feat_lengths)
-            l_cov = map_coverage_loss(logits3, raw_mask_batch, feat_lengths, threshold=args.coverage_threshold)
-            l_rank = map_ranking_loss(logits3, raw_mask_batch, feat_lengths, margin=args.ranking_margin)
             loss_total_bce += l_bce.item()
             loss_total_smooth += l_smooth.item()
-            loss_total_cov += l_cov.item()
-            loss_total_rank += l_rank.item()
 
             loss = (loss1 + loss2 + loss3
-                    + args.lambda_bce * l_bce + args.lambda_smooth * l_smooth
-                    + args.lambda_coverage * l_cov + args.lambda_ranking * l_rank)
+                    + args.lambda_bce * l_bce + args.lambda_smooth * l_smooth)
 
             optimizer.zero_grad()
             loss.backward()
@@ -331,8 +280,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             pbar.set_postfix(loss1=loss_total1 / (i + 1),
                              loss2=loss_total2 / (i + 1),
                              L_bce=loss_total_bce / (i + 1),
-                             L_cov=loss_total_cov / (i + 1),
-                             L_rk=loss_total_rank / (i + 1))
+                             L_smooth=loss_total_smooth / (i + 1))
 
             step += i * normal_loader.batch_size * 2
             if step % 1280 == 0 and step != 0:
@@ -340,8 +288,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                 log_metrics(logger,
                     f"[Epoch {e+1} step={step}] "
                     f"loss1={loss_total1/n_cur:.4f} loss2={loss_total2/n_cur:.4f} loss3={loss_total3/n_cur:.4f} | "
-                    f"L_bce={loss_total_bce/n_cur:.4f} L_smooth={loss_total_smooth/n_cur:.4f} "
-                    f"L_cov={loss_total_cov/n_cur:.4f} L_rank={loss_total_rank/n_cur:.4f}")
+                    f"L_bce={loss_total_bce/n_cur:.4f} L_smooth={loss_total_smooth/n_cur:.4f}")
 
                 auc1, _, auc3, _, score_maps = test(model, testloader, args.visual_length, prompt_text,
                                                     gt, gtsegments, gtlabels, device, logger)
@@ -370,8 +317,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         log_metrics(logger,
             f"[Epoch {e+1}/{args.max_epoch}] "
             f"loss1={loss_total1/n:.4f} loss2={loss_total2/n:.4f} loss3={loss_total3/n:.4f} | "
-            f"L_bce={loss_total_bce/n:.4f} L_smooth={loss_total_smooth/n:.4f} "
-            f"L_cov={loss_total_cov/n:.4f} L_rank={loss_total_rank/n:.4f}")
+            f"L_bce={loss_total_bce/n:.4f} L_smooth={loss_total_smooth/n:.4f}")
         log_metrics(logger,
             f"  logits3: anomaly={epoch_map_stats['anomaly_mean']:.3f} "
             f"normal={epoch_map_stats['normal_mean']:.3f} "

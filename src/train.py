@@ -95,6 +95,34 @@ def map_smooth_loss(logits3, raw_mask, lengths):
     return total_loss / total_count
 
 
+def map_mass_ratio_loss(logits3, raw_mask, lengths, margin=0.3, eps=1e-8):
+    """Event-Mass Ratio loss: push Σs(in-event) / Σs(all) above ETR + margin.
+
+    Directly drives Objective 2 (mass concentrated in event) so cumsum
+    sampler zooms into event regions.
+    """
+    scores = torch.sigmoid(logits3.squeeze(-1))
+    total_loss = 0.0
+    total_count = 0
+    for i in range(scores.shape[0]):
+        L = int(lengths[i].item())
+        if L == 0:
+            continue
+        s = scores[i, :L]
+        m = raw_mask[i, :L]
+        in_event = m > 0.5
+        if not in_event.any() or in_event.all():
+            continue  # normal video or fully anomalous — nothing to drive
+        etr = in_event.float().mean()
+        pred_ratio = s[in_event].sum() / (s.sum() + eps)
+        target = etr + margin
+        total_loss = total_loss + F.relu(target - pred_ratio)
+        total_count += 1
+    if total_count == 0:
+        return torch.tensor(0.0, device=logits3.device, requires_grad=True)
+    return total_loss / total_count
+
+
 def map_coverage_loss(logits3, raw_mask, lengths, threshold=0.5):
     """Push anomaly frame scores above threshold."""
     scores = torch.sigmoid(logits3.squeeze(-1))

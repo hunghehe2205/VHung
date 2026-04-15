@@ -31,3 +31,11 @@ parser.add_argument('--gt-path', default='list/gt_ucf.npy')
 parser.add_argument('--gt-segment-path', default='list/gt_segment_ucf.npy')
 parser.add_argument('--gt-label-path', default='list/gt_label_ucf.npy')
 
+# dev_bce — supervised losses
+parser.add_argument('--train-json',
+                    default='HIVAU-70k-NEW/ucf_database_train_filtered.json')
+parser.add_argument('--pos-weight-path', default='list/pos_weight_bin.npy')
+parser.add_argument('--phase1-epochs', default=3, type=int)
+parser.add_argument('--phase2-epochs', default=6, type=int)
+parser.add_argument('--lambda1', default=0.1, type=float)
+parser.add_argument('--lambda2', default=0.1, type=float)

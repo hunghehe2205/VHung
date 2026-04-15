@@ -10,6 +10,11 @@ from model import CLIPVAD
 from utils.dataset import UCFDataset
 from utils.tools import get_batch_mask, get_prompt_text
 from utils.detection_map import getDetectionMAP as dmAP
+from utils.map_metrics import (
+    compute_per_video_metrics,
+    binary_detection_map,
+    composite_map_score,
+)
 import option
 
 LABEL_MAP = {
@@ -28,6 +33,11 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels,
 
     element_logits2_stack = []
     score_maps = {}
+
+    per_video_metrics = []
+    binary_preds = []      # list of frame-level prob3 arrays
+    binary_gt_segs = []    # list of [[start, end], ...]
+    video_start = 0        # running index into `gt` array
 
     with torch.no_grad():
         for i, item in enumerate(tqdm(testdataloader, desc='Testing')):
@@ -80,6 +90,17 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels,
             score_map_np = np.repeat(prob3.cpu().numpy(), 16)
             score_maps[f"video_{i:04d}_{label}"] = score_map_np
 
+            # Per-video map metrics (uses frame-level gt slice + gt_segments[i]).
+            video_len_frames = score_map_np.shape[0]
+            gt_slice = np.asarray(gt[video_start: video_start + video_len_frames], dtype=np.float32)
+            video_start += video_len_frames
+
+            metrics_i = compute_per_video_metrics(score_map_np, gt_slice)
+            per_video_metrics.append(metrics_i)
+            binary_preds.append(score_map_np)
+            seg_list = gtsegments[i] if gtsegments[i] is not None else []
+            binary_gt_segs.append([list(map(int, s)) for s in seg_list])
+
     ap1 = ap1.cpu().numpy().tolist()
     ap2 = ap2.cpu().numpy().tolist()
     ap3 = ap3.cpu().numpy().tolist()
@@ -95,6 +116,33 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels,
     print(f"  AUC3: {ROC3:.4f}  AP3: {AP3:.4f}  (logits3 - map head)")
     print(f"  AUC2: {ROC2:.4f}  AP2: {AP2:.4f}  (logits2 - text align)")
 
+    # Aggregate per-video metrics. Use nan-aware mean for metrics defined only on anomaly videos.
+    def _nanmean_key(key):
+        vals = [m[key] for m in per_video_metrics if not (isinstance(m[key], float) and np.isnan(m[key]))]
+        return float(np.mean(vals)) if vals else float('nan')
+
+    gap_mean = _nanmean_key('gap')
+    mcl_mean = _nanmean_key('mcl')
+    pc_mean = _nanmean_key('peak_concentration')
+    cov05_mean = _nanmean_key('in_event_cov_05')
+    cov03_mean = _nanmean_key('in_event_cov_03')
+    entropy_mean = _nanmean_key('in_event_entropy')
+
+    # Normal-mean: averaged on videos with no events (gtsegments[i] empty).
+    normal_means = []
+    for i, m in enumerate(per_video_metrics):
+        if len(binary_gt_segs[i]) == 0:
+            normal_means.append(m['out_mean'])
+    normal_mean = float(np.mean(normal_means)) if normal_means else float('nan')
+
+    binary_map = binary_detection_map(binary_preds, binary_gt_segs)
+
+    aggregated = {
+        'gap': gap_mean, 'mcl': mcl_mean, 'peak_concentration': pc_mean,
+        'map_avg': binary_map['map_avg'],
+    }
+    map_score = composite_map_score(aggregated)
+
     dmap, iou = dmAP(element_logits2_stack, gtsegments, gtlabels, excludeNormal=False)
     averageMAP = 0
     for k in range(5):
@@ -103,14 +151,28 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels,
     averageMAP = averageMAP / 5
     print('  average MAP: {:.2f}'.format(averageMAP))
 
+    print("  --- Map Quality Metrics ---")
+    print(f"  [Separation] Gap={gap_mean:.3f}  Normal-mean={normal_mean:.3f}")
+    print(f"  [Mass]       MCL={mcl_mean:.3f}")
+    print(f"  [Localize]   mAP@IoU avg={binary_map['map_avg']:.3f}  "
+          f"@0.1={binary_map['map_at_iou_01']:.3f}  @0.5={binary_map['map_at_iou_05']:.3f}")
+    print(f"  [Density]    InEventCov@0.5={cov05_mean:.3f}  InEventCov@0.3={cov03_mean:.3f}  "
+          f"PeakConc={pc_mean:.3f}  Entropy={entropy_mean:.3f}")
+    print(f"  [Composite]  MapScore={map_score:.4f}")
+
     if logger:
         logger.info(
             f"[Eval] AUC1={ROC1:.4f} AP1={AP1:.4f} | "
             f"AUC3={ROC3:.4f} AP3={AP3:.4f} | "
             f"AUC2={ROC2:.4f} AP2={AP2:.4f} | "
             f"avgMAP={averageMAP:.2f}")
+        logger.info(
+            f"[MapEval] Gap={gap_mean:.3f} NormMean={normal_mean:.3f} MCL={mcl_mean:.3f} "
+            f"mAPavg={binary_map['map_avg']:.3f} InCov05={cov05_mean:.3f} "
+            f"PC={pc_mean:.3f} Entropy={entropy_mean:.3f} MapScore={map_score:.4f}"
+        )
 
-    return ROC1, AP1, ROC3, AP3, score_maps
+    return ROC1, AP1, ROC3, AP3, score_maps, map_score
 
 
 if __name__ == '__main__':
@@ -139,8 +201,8 @@ if __name__ == '__main__':
         logger.addHandler(fh)
         logger.setLevel(logging.INFO)
 
-    _, _, _, _, score_maps = test(model, testdataloader, args.visual_length, prompt_text,
-                                  gt, gtsegments, gtlabels, device, logger)
+    _, _, _, _, score_maps, _ = test(model, testdataloader, args.visual_length, prompt_text,
+                                     gt, gtsegments, gtlabels, device, logger)
 
     maps_dir = os.path.join(args.log_dir, 'score_maps')
     os.makedirs(maps_dir, exist_ok=True)

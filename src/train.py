@@ -1,3 +1,4 @@
+import math
 import os
 import logging
 from datetime import datetime
@@ -129,7 +130,6 @@ def map_density_loss(logits3, raw_mask, lengths, eps=1e-8):
     p̂[t] = s_t / Σ_event s_t; H = -Σ p̂ log p̂; H_norm = H / log(L_event).
     Loss = 1 - H_norm. Zero when in-event mass is uniform; 1 when fully spiky.
     """
-    import math
     scores = torch.sigmoid(logits3.squeeze(-1))
     total_loss = 0.0
     total_count = 0
@@ -155,37 +155,6 @@ def map_density_loss(logits3, raw_mask, lengths, eps=1e-8):
         return torch.tensor(0.0, device=logits3.device, requires_grad=True)
     return total_loss / total_count
 
-
-
-def compute_map_stats(logits3, raw_mask, lengths):
-    scores = torch.sigmoid(logits3.squeeze(-1)).detach()
-    anomaly_scores = []
-    normal_scores = []
-    for i in range(scores.shape[0]):
-        L = int(lengths[i].item())
-        if L == 0:
-            continue
-        s = scores[i, :L]
-        m = raw_mask[i, :L]
-        if (m > 0.5).any():
-            anomaly_scores.append(s[m > 0.5])
-        if (m < 0.5).any():
-            normal_scores.append(s[m < 0.5])
-
-    stats = {}
-    if anomaly_scores:
-        all_anom = torch.cat(anomaly_scores)
-        stats['anomaly_mean'] = all_anom.mean().item()
-        stats['coverage'] = (all_anom > 0.5).float().mean().item()
-    else:
-        stats['anomaly_mean'] = 0.0
-        stats['coverage'] = 0.0
-    if normal_scores:
-        stats['normal_mean'] = torch.cat(normal_scores).mean().item()
-    else:
-        stats['normal_mean'] = 0.0
-    stats['gap'] = stats['anomaly_mean'] - stats['normal_mean']
-    return stats
 
 
 def train(model, normal_loader, anomaly_loader, testloader, args, label_map, device):
@@ -227,8 +196,6 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         loss_total_smooth = 0
         loss_total_mass = 0
         loss_total_density = 0
-        epoch_map_stats = {'anomaly_mean': 0, 'normal_mean': 0, 'gap': 0, 'coverage': 0}
-        stat_count = 0
 
         normal_iter = iter(normal_loader)
         anomaly_iter = iter(anomaly_loader)
@@ -284,11 +251,6 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             loss.backward()
             optimizer.step()
 
-            batch_stats = compute_map_stats(logits3, raw_mask_batch, feat_lengths)
-            for k in epoch_map_stats:
-                epoch_map_stats[k] += batch_stats[k]
-            stat_count += 1
-
             pbar.set_postfix(loss1=loss_total1 / (i + 1),
                              loss2=loss_total2 / (i + 1),
                              L_bce=loss_total_bce / (i + 1),
@@ -327,20 +289,11 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                     log_metrics(logger, f"  Best MapScore={map_score_best:.4f} (current={map_score:.4f})")
 
         n = max(num_iters, 1)
-        sc = max(stat_count, 1)
-        for k in epoch_map_stats:
-            epoch_map_stats[k] /= sc
-
         log_metrics(logger,
             f"[Epoch {e+1}/{args.max_epoch}] "
             f"loss1={loss_total1/n:.4f} loss2={loss_total2/n:.4f} loss3={loss_total3/n:.4f} | "
             f"L_bce={loss_total_bce/n:.4f} L_smooth={loss_total_smooth/n:.4f} "
             f"L_mass={loss_total_mass/n:.4f} L_density={loss_total_density/n:.4f}")
-        log_metrics(logger,
-            f"  logits3: anomaly={epoch_map_stats['anomaly_mean']:.3f} "
-            f"normal={epoch_map_stats['normal_mean']:.3f} "
-            f"gap={epoch_map_stats['gap']:.3f} "
-            f"coverage={epoch_map_stats['coverage']:.3f}")
 
         scheduler.step()
         torch.save(model.state_dict(), 'final_model/model_cur.pth')

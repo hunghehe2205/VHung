@@ -47,7 +47,7 @@ def mass_stats(scores: np.ndarray, mask: np.ndarray, eps: float = 1e-8) -> dict:
     emr = float(in_mass / (total_mass + eps)) if total_mass > 0 else 0.0
     etr = float(mask.sum() / mask.size) if mask.size > 0 else 0.0
     mcl = float(emr / etr) if etr > 0 else float('nan')
-    return {'emr': emr, 'etr': etr, 'mcl': mcl, 'mass_lift': emr - etr}
+    return {'emr': emr, 'etr': etr, 'mcl': mcl}
 
 
 def density_stats(scores: np.ndarray, mask: np.ndarray,

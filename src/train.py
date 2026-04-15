@@ -1,5 +1,6 @@
 import math
 import os
+import time
 import logging
 from datetime import datetime
 
@@ -33,8 +34,15 @@ def setup_logging(log_dir):
 
 
 def log_metrics(logger, msg):
+    """Log significant, infrequent events to BOTH console and file log."""
     print(msg)
     logger.info(msg)
+
+
+def console_only(msg):
+    """Print to console only — use for frequent/progress updates that
+    should never spam the file log (tqdm-like cadence)."""
+    print(msg)
 
 
 def CLASM(logits, labels, lengths, device):
@@ -164,17 +172,19 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
     gtlabels = np.load(args.gt_label_path, allow_pickle=True)
 
     logger = setup_logging(args.log_dir)
-    log_metrics(logger, f"=== Training started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
-    log_metrics(logger, f"lambda_bce={args.lambda_bce} lambda_smooth={args.lambda_smooth} "
+    log_metrics(logger, f"=== Training started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} "
+                        f"| epochs={args.max_epoch} lr={args.lr} batch={args.batch_size} "
+                        f"train_n={len(normal_loader)}+{len(anomaly_loader)} test={len(testloader)} ===")
+    log_metrics(logger, f"[Loss] lambda_bce={args.lambda_bce} lambda_smooth={args.lambda_smooth} "
                         f"lambda_mass={args.lambda_mass} lambda_density={args.lambda_density} "
-                        f"mass_margin={args.mass_margin} "
-                        f"smooth_sigma={args.smooth_sigma} lr={args.lr} epochs={args.max_epoch} "
-                        f"detach=False")
+                        f"mass_margin={args.mass_margin} smooth_sigma={args.smooth_sigma}")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     scheduler = MultiStepLR(optimizer, args.scheduler_milestones, args.scheduler_rate)
     prompt_text = get_prompt_text(label_map)
     map_score_best = 0.0
+    prev_map_score = None  # for delta tracking across evaluations
+    best_per_metric = {'gap': 0.0, 'mcl': 0.0, 'map_avg': 0.0, 'anti_spike': 0.0}
     epoch = 0
 
     if args.use_checkpoint:
@@ -189,6 +199,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
 
     for e in range(args.max_epoch):
         model.train()
+        epoch_start_time = time.time()
         loss_total1 = 0
         loss_total2 = 0
         loss_total3 = 0
@@ -196,6 +207,10 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         loss_total_smooth = 0
         loss_total_mass = 0
         loss_total_density = 0
+        # Sum-of-squares for per-epoch stddev of the combined loss (stability indicator).
+        loss_total_combined = 0.0
+        loss_sqsum_combined = 0.0
+        grad_norm_last = 0.0
 
         normal_iter = iter(normal_loader)
         anomaly_iter = iter(anomaly_loader)
@@ -247,9 +262,25 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                     + args.lambda_mass * l_mass
                     + args.lambda_density * l_density)
 
+            if not torch.isfinite(loss):
+                log_metrics(logger,
+                    f"[FATAL] Non-finite loss at epoch={e+1} iter={i}: total={loss.item()} "
+                    f"l1={loss1.item()} l2={loss2.item()} l3={loss3.item()} "
+                    f"bce={l_bce.item()} smooth={l_smooth.item()} "
+                    f"mass={l_mass.item()} density={l_density.item()}")
+                raise RuntimeError("Training aborted: non-finite loss.")
+
             optimizer.zero_grad()
             loss.backward()
+            # Total gradient L2 norm — captured pre-step so we see what actually updated weights.
+            grad_norm_last = torch.nn.utils.clip_grad_norm_(
+                model.parameters(), max_norm=float('inf')).item()
             optimizer.step()
+
+            # Track combined loss dispersion for epoch-level stability reporting.
+            lv = loss.item()
+            loss_total_combined += lv
+            loss_sqsum_combined += lv * lv
 
             pbar.set_postfix(loss1=loss_total1 / (i + 1),
                              loss2=loss_total2 / (i + 1),
@@ -264,16 +295,43 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                     f"[Epoch {e+1} step={step}] "
                     f"loss1={loss_total1/n_cur:.4f} loss2={loss_total2/n_cur:.4f} loss3={loss_total3/n_cur:.4f} | "
                     f"L_bce={loss_total_bce/n_cur:.4f} L_smooth={loss_total_smooth/n_cur:.4f} "
-                    f"L_mass={loss_total_mass/n_cur:.4f} L_density={loss_total_density/n_cur:.4f}")
+                    f"L_mass={loss_total_mass/n_cur:.4f} L_density={loss_total_density/n_cur:.4f} | "
+                    f"grad_norm={grad_norm_last:.3f}")
 
-                auc1, _, auc3, _, score_maps, map_score = test(
+                auc1, _, auc3, _, score_maps, map_score, map_breakdown = test(
                     model, testloader, args.visual_length, prompt_text,
                     gt, gtsegments, gtlabels, device, logger)
 
+                # Delta vs previous evaluation — shows whether model is improving/regressing.
+                if prev_map_score is not None:
+                    delta = map_score - prev_map_score
+                    arrow = '↑' if delta >= 0 else '↓'
+                    log_metrics(logger,
+                        f"  ΔMapScore={arrow}{abs(delta):+.4f} "
+                        f"(gap={map_breakdown['gap']:.3f} mcl={map_breakdown['mcl']:.3f} "
+                        f"mAP={map_breakdown['map_avg']:.3f} PC={map_breakdown['peak_concentration']:.3f})")
+                prev_map_score = map_score
+
+                # Per-component best tracking (independent of composite).
+                updates = []
+                for k in ('gap', 'mcl', 'map_avg'):
+                    if map_breakdown[k] > best_per_metric[k]:
+                        best_per_metric[k] = map_breakdown[k]
+                        updates.append(f"{k}={map_breakdown[k]:.3f}")
+                anti_spike = 1.0 - map_breakdown['peak_concentration']
+                if anti_spike > best_per_metric['anti_spike']:
+                    best_per_metric['anti_spike'] = anti_spike
+                    updates.append(f"anti_spike={anti_spike:.3f}")
+                if updates:
+                    log_metrics(logger, f"  per-metric best↑: " + ' '.join(updates))
+
                 if map_score > map_score_best:
                     map_score_best = map_score
-                    log_metrics(logger, f"  >> New best MapScore={map_score_best:.4f} "
-                                        f"(AUC1={auc1:.4f} AUC3={auc3:.4f})")
+                    log_metrics(logger,
+                        f"  >> New best MapScore={map_score_best:.4f} "
+                        f"[gap={map_breakdown['gap']:.3f} mcl={map_breakdown['mcl']:.3f} "
+                        f"mAP={map_breakdown['map_avg']:.3f} PC={map_breakdown['peak_concentration']:.3f}] "
+                        f"(AUC1={auc1:.4f} AUC3={auc3:.4f})")
                     maps_dir = os.path.join(args.log_dir, 'score_maps')
                     os.makedirs(maps_dir, exist_ok=True)
                     for name, smap in score_maps.items():
@@ -283,17 +341,25 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                         'model_state_dict': model.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
                         'map_score': map_score_best,
+                        'map_breakdown': map_breakdown,
                     }
                     torch.save(checkpoint, args.checkpoint_path)
                 else:
                     log_metrics(logger, f"  Best MapScore={map_score_best:.4f} (current={map_score:.4f})")
 
         n = max(num_iters, 1)
+        epoch_seconds = time.time() - epoch_start_time
+        current_lr = optimizer.param_groups[0]['lr']
+        combined_mean = loss_total_combined / n
+        combined_var = max(0.0, loss_sqsum_combined / n - combined_mean ** 2)
+        combined_std = math.sqrt(combined_var)
         log_metrics(logger,
             f"[Epoch {e+1}/{args.max_epoch}] "
             f"loss1={loss_total1/n:.4f} loss2={loss_total2/n:.4f} loss3={loss_total3/n:.4f} | "
             f"L_bce={loss_total_bce/n:.4f} L_smooth={loss_total_smooth/n:.4f} "
-            f"L_mass={loss_total_mass/n:.4f} L_density={loss_total_density/n:.4f}")
+            f"L_mass={loss_total_mass/n:.4f} L_density={loss_total_density/n:.4f} | "
+            f"combined={combined_mean:.4f}±{combined_std:.4f} "
+            f"lr={current_lr:.2e} dt={epoch_seconds:.1f}s")
 
         scheduler.step()
         torch.save(model.state_dict(), 'final_model/model_cur.pth')
@@ -302,7 +368,11 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
 
     checkpoint = torch.load(args.checkpoint_path, weights_only=False)
     torch.save(checkpoint['model_state_dict'], args.model_path)
-    log_metrics(logger, f"=== Training finished. Best MapScore: {map_score_best:.4f} ===")
+    log_metrics(logger,
+        f"=== Training finished. Best MapScore: {map_score_best:.4f} | "
+        f"best per-metric: gap={best_per_metric['gap']:.3f} "
+        f"mcl={best_per_metric['mcl']:.3f} mAP={best_per_metric['map_avg']:.3f} "
+        f"anti_spike={best_per_metric['anti_spike']:.3f} ===")
 
 
 def setup_seed(seed):

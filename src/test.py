@@ -138,10 +138,31 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels,
     binary_map = binary_detection_map(binary_preds, binary_gt_segs)
 
     aggregated = {
-        'gap': gap_mean, 'mcl': mcl_mean, 'peak_concentration': pc_mean,
+        'gap': gap_mean,
+        'mcl': mcl_mean,
+        'peak_concentration': pc_mean,
         'map_avg': binary_map['map_avg'],
+        'map_at_iou_01': binary_map['map_at_iou_01'],
+        'map_at_iou_05': binary_map['map_at_iou_05'],
+        'in_event_cov_05': cov05_mean,
+        'in_event_cov_03': cov03_mean,
+        'in_event_entropy': entropy_mean,
+        'normal_mean': normal_mean,
     }
     map_score = composite_map_score(aggregated)
+
+    # Score distribution of logits3 across the entire test set — useful for
+    # spotting calibration issues (collapsed, saturated, or skewed maps).
+    all_prob3 = np.asarray(ap3, dtype=np.float64)
+    prob3_dist = {
+        'min': float(all_prob3.min()),
+        'p25': float(np.percentile(all_prob3, 25)),
+        'median': float(np.median(all_prob3)),
+        'p75': float(np.percentile(all_prob3, 75)),
+        'max': float(all_prob3.max()),
+        'mean': float(all_prob3.mean()),
+        'std': float(all_prob3.std()),
+    }
 
     dmap, iou = dmAP(element_logits2_stack, gtsegments, gtlabels, excludeNormal=False)
     averageMAP = 0
@@ -158,6 +179,9 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels,
           f"@0.1={binary_map['map_at_iou_01']:.3f}  @0.5={binary_map['map_at_iou_05']:.3f}")
     print(f"  [Density]    InEventCov@0.5={cov05_mean:.3f}  InEventCov@0.3={cov03_mean:.3f}  "
           f"PeakConc={pc_mean:.3f}  Entropy={entropy_mean:.3f}")
+    print(f"  [Dist p3]    min={prob3_dist['min']:.3f} p25={prob3_dist['p25']:.3f} "
+          f"med={prob3_dist['median']:.3f} p75={prob3_dist['p75']:.3f} "
+          f"max={prob3_dist['max']:.3f}  (mean={prob3_dist['mean']:.3f}±{prob3_dist['std']:.3f})")
     print(f"  [Composite]  MapScore={map_score:.4f}")
 
     if logger:
@@ -169,10 +193,11 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels,
         logger.info(
             f"[MapEval] Gap={gap_mean:.3f} NormMean={normal_mean:.3f} MCL={mcl_mean:.3f} "
             f"mAPavg={binary_map['map_avg']:.3f} InCov05={cov05_mean:.3f} "
-            f"PC={pc_mean:.3f} Entropy={entropy_mean:.3f} MapScore={map_score:.4f}"
+            f"PC={pc_mean:.3f} Entropy={entropy_mean:.3f} MapScore={map_score:.4f} | "
+            f"p3_med={prob3_dist['median']:.3f} p3_mean={prob3_dist['mean']:.3f}±{prob3_dist['std']:.3f}"
         )
 
-    return ROC1, AP1, ROC3, AP3, score_maps, map_score
+    return ROC1, AP1, ROC3, AP3, score_maps, map_score, aggregated
 
 
 if __name__ == '__main__':
@@ -201,8 +226,8 @@ if __name__ == '__main__':
         logger.addHandler(fh)
         logger.setLevel(logging.INFO)
 
-    _, _, _, _, score_maps, _ = test(model, testdataloader, args.visual_length, prompt_text,
-                                     gt, gtsegments, gtlabels, device, logger)
+    _, _, _, _, score_maps, _, _ = test(model, testdataloader, args.visual_length, prompt_text,
+                                        gt, gtsegments, gtlabels, device, logger)
 
     maps_dir = os.path.join(args.log_dir, 'score_maps')
     os.makedirs(maps_dir, exist_ok=True)

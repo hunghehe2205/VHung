@@ -39,4 +39,7 @@ parser.add_argument('--phase1-epochs', default=3, type=int)
 parser.add_argument('--phase2-epochs', default=6, type=int)
 parser.add_argument('--lambda1', default=0.1, type=float)
 parser.add_argument('--lambda2', default=0.1, type=float)
-parser.add_argument('--focal-gamma', default=2.0, type=float)
+parser.add_argument('--focal-gamma', default=2.0, type=float,
+                    help='0 = plain BCE, >0 = focal BCE with that gamma')
+parser.add_argument('--phase3-loss', default='tv', choices=['tv', 'dice'],
+                    help='Phase 3 localization loss: tv or dice')

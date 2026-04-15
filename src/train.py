@@ -71,6 +71,21 @@ def tv_smoothness_loss(probs, mask):
     return (diffs * valid).sum() / valid.sum().clamp_min(1.0)
 
 
+def dice_loss_anomaly(probs, target, mask, eps=1.0):
+    """Soft Dice on [B, T] probs, reduced over anomaly videos only.
+    Normal videos (all-zero target) are skipped to avoid redundant signal
+    with BCE. eps=1 for smoothing and non-zero gradient when union small.
+    """
+    mask_f = mask.float()
+    p = probs * mask_f
+    y = target * mask_f
+    inter = (p * y).sum(-1)
+    denom = p.sum(-1) + y.sum(-1)
+    dice = (2.0 * inter + eps) / (denom + eps)
+    has_pos = (y.sum(-1) > 0).float()
+    return ((1.0 - dice) * has_pos).sum() / has_pos.sum().clamp_min(1.0)
+
+
 def frame_bce_loss(logits, target, mask, pos_weight):
     """Frame-level binary BCE on logits1 with scalar pos_weight.
     logits: [B, T] raw logits.
@@ -145,7 +160,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         lam1, lam2 = get_lambda(e, args.phase1_epochs, args.phase2_epochs,
                                 args.lambda1, args.lambda2)
         model.train()
-        sum_bce_v = sum_nce = sum_cts = sum_fbce = sum_tv = 0.0
+        sum_bce_v = sum_nce = sum_cts = sum_fbce = sum_p3 = 0.0
         n_iters = min(len(normal_loader), len(anomaly_loader))
         t_start = time.time()
         pbar = tqdm(range(n_iters),
@@ -184,8 +199,13 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                 logits1_2d = logits1.squeeze(-1)                          # [2B, T]
                 mask_T = (torch.arange(logits1_2d.shape[1], device=device)
                           .unsqueeze(0) < lengths.unsqueeze(1))            # [2B, T]
-                loss_fbce = focal_bce_loss(logits1_2d, y_bin, mask_T,
-                                           pos_weight_bin, gamma=args.focal_gamma)
+                if args.focal_gamma > 0:
+                    loss_fbce = focal_bce_loss(logits1_2d, y_bin, mask_T,
+                                               pos_weight_bin,
+                                               gamma=args.focal_gamma)
+                else:
+                    loss_fbce = frame_bce_loss(logits1_2d, y_bin, mask_T,
+                                               pos_weight_bin)
             else:
                 loss_fbce = torch.zeros(1, device=device)
 
@@ -193,12 +213,15 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                 probs = torch.sigmoid(logits1.squeeze(-1))
                 mask_T2 = (torch.arange(probs.shape[1], device=device)
                            .unsqueeze(0) < lengths.unsqueeze(1))
-                loss_tv = tv_smoothness_loss(probs, mask_T2)
+                if args.phase3_loss == 'dice':
+                    loss_p3 = dice_loss_anomaly(probs, y_bin, mask_T2)
+                else:
+                    loss_p3 = tv_smoothness_loss(probs, mask_T2)
             else:
-                loss_tv = torch.zeros(1, device=device)
+                loss_p3 = torch.zeros(1, device=device)
 
             loss = (loss_bce_v + loss_nce + loss_cts
-                    + lam1 * loss_fbce + lam2 * loss_tv)
+                    + lam1 * loss_fbce + lam2 * loss_p3)
 
             optimizer.zero_grad()
             loss.backward()
@@ -208,19 +231,19 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             sum_nce   += float(loss_nce)
             sum_cts   += float(loss_cts)
             sum_fbce  += float(loss_fbce)
-            sum_tv    += float(loss_tv)
+            sum_p3    += float(loss_p3)
             pbar.set_postfix(bce_v=sum_bce_v / (i + 1),
                              nce=sum_nce / (i + 1),
                              cts=sum_cts / (i + 1),
                              fbce=sum_fbce / (i + 1),
-                             tv=sum_tv / (i + 1))
+                             p3=sum_p3 / (i + 1))
 
         train_secs = time.time() - t_start
         avg_bce_v = sum_bce_v / n_iters
         avg_nce = sum_nce / n_iters
         avg_cts = sum_cts / n_iters
         avg_fbce = sum_fbce / n_iters
-        avg_tv = sum_tv / n_iters
+        avg_p3 = sum_p3 / n_iters
 
         # End-of-epoch eval — model selection by class-agnostic avg_mAP
         AUC, avg_mAP, dmap_ag = test(
@@ -232,7 +255,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         print(f'[ep {e+1:2d}/{args.max_epoch} {train_secs:.0f}s] '
               f'lam=({lam1},{lam2}) | '
               f'bce_v={avg_bce_v:.3f} nce={avg_nce:.3f} cts={avg_cts:.4f} '
-              f'fbce={avg_fbce:.3f} tv={avg_tv:.3f} | '
+              f'fbce={avg_fbce:.3f} p3={avg_p3:.3f} | '
               f'AUC={AUC:.4f} mAP={avg_mAP:.2f} [{ag_str}]{tag}',
               flush=True)
         if is_best:

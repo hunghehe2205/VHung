@@ -29,3 +29,5 @@ output_infer/
 .DS_Store
 Thumbs.db
 final_model/
+
+logs/

@@ -205,7 +205,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     scheduler = MultiStepLR(optimizer, args.scheduler_milestones, args.scheduler_rate)
     prompt_text = get_prompt_text(label_map)
-    ap_best = 0
+    map_score_best = 0.0
     epoch = 0
 
     if args.use_checkpoint:
@@ -213,8 +213,8 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         epoch = checkpoint['epoch']
-        ap_best = checkpoint['ap']
-        log_metrics(logger, f"Loaded checkpoint: epoch={epoch + 1} ap={ap_best}")
+        map_score_best = checkpoint.get('map_score', checkpoint.get('ap', 0.0))
+        log_metrics(logger, f"Loaded checkpoint: epoch={epoch + 1} map_score={map_score_best}")
 
     os.makedirs('final_model', exist_ok=True)
 
@@ -304,12 +304,14 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                     f"L_bce={loss_total_bce/n_cur:.4f} L_smooth={loss_total_smooth/n_cur:.4f} "
                     f"L_mass={loss_total_mass/n_cur:.4f} L_density={loss_total_density/n_cur:.4f}")
 
-                auc1, _, auc3, _, score_maps = test(model, testloader, args.visual_length, prompt_text,
-                                                    gt, gtsegments, gtlabels, device, logger)
+                auc1, _, auc3, _, score_maps, map_score = test(
+                    model, testloader, args.visual_length, prompt_text,
+                    gt, gtsegments, gtlabels, device, logger)
 
-                if auc1 > ap_best:
-                    ap_best = auc1
-                    log_metrics(logger, f"  >> New best AUC1={ap_best:.4f} (AUC3={auc3:.4f})")
+                if map_score > map_score_best:
+                    map_score_best = map_score
+                    log_metrics(logger, f"  >> New best MapScore={map_score_best:.4f} "
+                                        f"(AUC1={auc1:.4f} AUC3={auc3:.4f})")
                     maps_dir = os.path.join(args.log_dir, 'score_maps')
                     os.makedirs(maps_dir, exist_ok=True)
                     for name, smap in score_maps.items():
@@ -318,10 +320,11 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                         'epoch': e,
                         'model_state_dict': model.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
-                        'ap': ap_best}
+                        'map_score': map_score_best,
+                    }
                     torch.save(checkpoint, args.checkpoint_path)
                 else:
-                    log_metrics(logger, f"  Best AUC1={ap_best:.4f} (current={auc1:.4f})")
+                    log_metrics(logger, f"  Best MapScore={map_score_best:.4f} (current={map_score:.4f})")
 
         n = max(num_iters, 1)
         sc = max(stat_count, 1)
@@ -346,7 +349,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
 
     checkpoint = torch.load(args.checkpoint_path, weights_only=False)
     torch.save(checkpoint['model_state_dict'], args.model_path)
-    log_metrics(logger, f"=== Training finished. Best AUC1: {ap_best:.4f} ===")
+    log_metrics(logger, f"=== Training finished. Best MapScore: {map_score_best:.4f} ===")
 
 
 def setup_seed(seed):

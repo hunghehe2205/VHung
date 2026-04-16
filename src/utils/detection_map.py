@@ -147,7 +147,7 @@ def _loc_map_agnostic(predictions, th, gtsegments, gtlabels):
     for i in range(videos_num):
         tmp = predictions[i]
         segment_predict_multithr = []
-        thr_set = np.arange(0.6, 0.7, 0.1)
+        thr_set = np.arange(0.3, 0.8, 0.1)  # multi-threshold: [0.3,0.4,0.5,0.6,0.7]
         for thr in thr_set:
             if tmp.max() == tmp.min():
                 continue

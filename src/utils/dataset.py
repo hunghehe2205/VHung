@@ -21,12 +21,13 @@ def _parse_video_name(path: str) -> str:
 class UCFDataset(data.Dataset):
     def __init__(self, clip_dim: int, file_path: str, test_mode: bool,
                  label_map: dict, normal: bool = False,
-                 json_path: str = None):
+                 json_path: str = None, boundary_sigma: float = 2.0):
         self.df = pd.read_csv(file_path)
         self.clip_dim = clip_dim
         self.test_mode = test_mode
         self.label_map = label_map
         self.normal = normal
+        self.boundary_sigma = boundary_sigma
 
         if normal and not test_mode:
             self.df = self.df.loc[self.df['label'] == 'Normal'].reset_index(drop=True)
@@ -72,11 +73,12 @@ class UCFDataset(data.Dataset):
                 target_len=self.clip_dim,
             )
             y_bin = torch.from_numpy(y_bin)  # [clip_dim] float32
-            s_cls, e_cls, s_off, e_off = tools.build_boundary_offset_targets(
+            s_cls, e_cls = tools.build_boundary_gaussian_targets(
                 events_sec=events_sec, fps=fps,
-                n_features=n_features_raw, clip_len=16, target_len=self.clip_dim)
+                n_features=n_features_raw, clip_len=16,
+                target_len=self.clip_dim, sigma=self.boundary_sigma)
             bnd_targets = torch.from_numpy(
-                np.stack([s_cls, e_cls, s_off, e_off]))  # [4, clip_dim]
+                np.stack([s_cls, e_cls]))  # [2, clip_dim]
             return clip_feature, clip_label, y_bin, clip_length, bnd_targets
 
         # test mode — keep legacy 3-tuple for compatibility with test.py

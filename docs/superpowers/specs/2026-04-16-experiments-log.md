@@ -118,6 +118,30 @@
 
 **Irony**: Exp 10 heads learned (lower bnd, fewer proposals) nhưng hurt backbone. Exp 11 protects backbone nhưng heads can't learn.
 
+#### Exp 12 — Selective backprop + abnormal-only boundary + scheduler fix
+- **Selective backprop**: cls heads → gradient flows to backbone, offset heads → detached. Best of both worlds attempt.
+- **Abnormal-only boundary**: boundary loss chỉ tính trên abnormal videos (B_half:), bỏ noise từ Normal.
+- **Scheduler fix**: milestones [4,8] → [6,11] — heads có 2 epoch full LR trước khi drop.
+- **Model selection**: chuyển sang abn-only mAP thay vì all-vid.
+- **Eval speed**: skip per-class & all-vid mAP khi `quiet=True` → eval time ~65% nhanh hơn.
+
+| Ep | Phase | bnd_cls | bnd_off | mAP_abn | [@0.1/0.2/0.3/0.4/0.5] | AUC |
+|---:|---|---:|---:|---:|---|---:|
+| 3 | P1 | 0.000 | 0.000 | 15.09 | 34.81/22.49/10.05/5.82/2.29 | 0.8556 |
+| 5 | P2 | 0.547 | 0.097 | 18.87 | 39.49/28.25/15.19/7.69/3.75 | 0.8541 |
+| 7 | P3 | 0.543 | 0.096 | 20.83 | 42.41/30.06/17.97/9.16/4.55 | 0.8551 |
+| 11 | P3 | 0.542 | 0.096 | 23.54 | 44.28/32.30/22.11/11.93/7.07 | 0.8545 |
+| 13 | P3 | 0.542 | 0.096 | 23.77 | 44.33/32.63/22.42/12.23/7.23 | 0.8554 |
+| **15** | P3 | 0.542 | 0.096 | **23.93** | **44.84/32.88/22.58/12.32/7.05** | 0.8555 |
+
+Best: **mAP_abn=23.93 (ep15)**, AUC=0.8555. **New best, vượt Exp 6 (21.71).**
+
+**Kết luận: mAP improvement đến từ Dice + contrast + abnormal-only training, KHÔNG phải boundary heads.**
+- `bnd_off = 0.096` flat suốt — offset head vẫn dead dù có selective backprop
+- `bnd_cls` giảm rất chậm (0.599→0.541) — cls head gần như không học
+- Scheduler fix [6,11] cho heads 2 epoch full LR, nhưng với detached offset head thì không đủ
+- Backbone không bị hurt (AUC ổn định ~0.855)
+
 ---
 
 ## 4. Tóm tắt
@@ -136,6 +160,7 @@
 | 9 | BSN v1: start/end heads | 2.16 (BSN) | 0.8404 | heads quá yếu |
 | 10 | BSN v2: x_diff + offset | **20.29** | 0.8631 | x_diff work, < Exp6 |
 | 11 | Exp10 + stop-gradient | **21.15** | 0.8619 | backbone recover, heads frozen |
+| **12** | **selective backprop + abn-only bnd** | **23.93** | 0.8555 | **New best. Heads still dead** |
 
 \* _Eval cũ (gtpos=306), chưa re-eval_
 
@@ -144,19 +169,22 @@
 | | @0.1 | @0.2 | @0.3 | @0.4 | @0.5 | AVG |
 |---|---:|---:|---:|---:|---:|---:|
 | Baseline | 35.80 | 22.34 | 12.23 | 7.09 | 2.82 | 16.06 |
-| **Exp 6** | **42.03** | **30.20** | **19.21** | **11.10** | **6.04** | **21.71** |
+| Exp 6 | 42.03 | 30.20 | 19.21 | 11.10 | 6.04 | 21.71 |
 | Exp 10 | 39.94 | 29.55 | 17.67 | 9.57 | 4.71 | 20.29 |
 | Exp 11 | 41.39 | 29.41 | 19.83 | 9.85 | 5.25 | 21.15 |
+| **Exp 12** | **44.84** | **32.88** | **22.58** | **12.32** | **7.05** | **23.93** |
 
 ### Key insights
 
 1. **Loss tuning** (Exp 1-5): Dice > TV > IoU. Plain BCE > focal. Loss ceiling ~11.70.
 2. **Debias** (Exp 6): pw=1.0 + contrast loss phá ceiling. Ép peak đúng GT position → +5.65 mAP vs baseline.
 3. **Architecture**: Đừng touch temporal mixing — wider = worse @0.4-0.5 (Exp 7). Sim GCN beneficial (Exp 8).
-4. **Boundary heads** (Exp 9-11): x_diff feature injection giúp heads học transition. Nhưng heads backprop hurt backbone (Exp 10), detach thì heads frozen do LR conflict (Exp 11).
-5. **FP trên Normal videos**: 100% có proposals do adaptive threshold relative. Cần threshold filtering hoặc absolute minimum score.
+4. **Boundary heads** (Exp 9-12): x_diff giúp heads learn (Exp 10), nhưng backprop hurt backbone. Detach/selective backprop bảo vệ backbone nhưng heads frozen (bnd_off=0.096 flat, bnd_cls barely moves). Root causes: extreme sparsity (~2/256 positives), LR coupling, insufficient signal.
+5. **Exp 12 gains = Dice + contrast + scheduler fix**, không phải boundary heads. Scheduler [6,11] cho backbone train lâu hơn ở full LR → mAP +2.2 vs Exp 6.
+6. **FP trên Normal videos**: 100% có proposals do adaptive threshold relative. Cần threshold filtering hoặc absolute minimum score.
 
 ### Bottleneck hiện tại
 
-- **Exp 6 vẫn best** (21.71). Boundary heads approach chưa tìm được sweet spot giữa backbone protection và head learning.
-- **Next steps**: (1) Separate optimizer/LR cho boundary heads, (2) Threshold filtering parameter sweep cho FP reduction, (3) Freeze backbone + train heads with higher LR.
+- **Exp 12 = best** (23.93). Boundary heads 3 experiment liên tiếp không learn.
+- **Chưa thử**: (1) Separate optimizer/LR cho heads, (2) Gaussian-smoothed targets giảm sparsity, (3) Bỏ offset (dead weight) chỉ giữ cls.
+- **Next**: Exp 13 — fix 3 root causes cùng lúc.

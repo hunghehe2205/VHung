@@ -22,6 +22,8 @@ parser.add_argument('--scheduler-rate', default=0.1, type=float)
 parser.add_argument('--scheduler-milestones', default=[4, 8], nargs='+', type=int)
 parser.add_argument('--grad-clip', default=0.0, type=float,
                     help='Max grad norm for clipping (0 = off)')
+parser.add_argument('--head-lr', default=2e-4, type=float,
+                    help='LR for boundary heads (separate optimizer, no decay)')
 
 # Paths
 parser.add_argument('--model-path', default='final_model/model_ucf.pth')

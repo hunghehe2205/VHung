@@ -118,45 +118,39 @@ def build_frame_labels(events_sec, fps, n_features, clip_len=16, target_len=256)
         return y
 
 
-def build_boundary_offset_targets(events_sec, fps, n_features, clip_len=16, target_len=256):
-    """Compute per-snippet start/end cls + offset targets from event timestamps.
-    Returns: (start_cls, end_cls, start_off, end_off) each [target_len] float32.
-    cls: 1.0 at boundary snippet, 0.0 elsewhere.
-    off: sub-snippet offset in [0, 1) at boundary snippet, 0 elsewhere.
+def build_boundary_gaussian_targets(events_sec, fps, n_features, clip_len=16,
+                                     target_len=256, sigma=2.0):
+    """Gaussian-smoothed boundary targets for start/end prediction.
+    Returns: (start_cls, end_cls) each [target_len] float32.
+    Peak=1.0 at boundary snippet, smooth decay with given sigma (in snippets).
     """
-    start_cls = np.zeros(target_len, dtype=np.float32)
-    end_cls = np.zeros(target_len, dtype=np.float32)
-    start_off = np.zeros(target_len, dtype=np.float32)
-    end_off = np.zeros(target_len, dtype=np.float32)
+    s_cls = np.zeros(target_len, dtype=np.float32)
+    e_cls = np.zeros(target_len, dtype=np.float32)
 
     if not events_sec:
-        return start_cls, end_cls, start_off, end_off
+        return s_cls, e_cls
 
-    # Snippet-to-raw mapping (same layout as uniform_extract / build_frame_labels)
     r = np.linspace(0, n_features, target_len + 1, dtype=np.int32)
+    t_idx = np.arange(target_len, dtype=np.float32)
 
     for s_sec, e_sec in events_sec:
         s_frame = float(s_sec) * fps
         e_frame = float(e_sec) * fps
-        s_raw = s_frame / clip_len  # fractional raw snippet index
+        s_raw = s_frame / clip_len
         e_raw = e_frame / clip_len
 
-        # Find target snippet containing start
         for t in range(target_len):
             if r[t] <= s_raw < r[t + 1] or (t == target_len - 1 and s_raw >= r[t]):
-                start_cls[t] = 1.0
-                snippet_start_frame = r[t] * clip_len
-                snippet_span = max((r[t + 1] - r[t]) * clip_len, clip_len)
-                start_off[t] = np.clip((s_frame - snippet_start_frame) / snippet_span, 0.0, 0.999)
+                gauss = np.exp(-0.5 * ((t_idx - t) / sigma) ** 2)
+                s_cls = np.maximum(s_cls, gauss)
                 break
 
-        # Find target snippet containing end
         for t in range(target_len):
             if r[t] <= e_raw < r[t + 1] or (t == target_len - 1 and e_raw >= r[t]):
-                end_cls[t] = 1.0
-                snippet_start_frame = r[t] * clip_len
-                snippet_span = max((r[t + 1] - r[t]) * clip_len, clip_len)
-                end_off[t] = np.clip((e_frame - snippet_start_frame) / snippet_span, 0.0, 0.999)
+                gauss = np.exp(-0.5 * ((t_idx - t) / sigma) ** 2)
+                e_cls = np.maximum(e_cls, gauss)
                 break
 
-    return start_cls, end_cls, start_off, end_off
+    s_cls[s_cls < 0.01] = 0.0
+    e_cls[e_cls < 0.01] = 0.0
+    return s_cls, e_cls

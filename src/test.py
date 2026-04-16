@@ -125,22 +125,28 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, d
     ROC2 = roc_auc_score(gt, ap2_frame)
     AP2 = average_precision_score(gt, ap2_frame)
 
-    from utils.detection_map import getDetectionMAP_agnostic, getDetectionMAP_agnostic_bsn
+    from utils.detection_map import (getDetectionMAP_agnostic,
+                                     getDetectionMAP_abnormal_only,
+                                     getDetectionMAP_agnostic_bsn)
 
     # Per-class (legacy)
     dmap_pc, iou = dmAP(element_logits2_stack, gtsegments, gtlabels,
                        excludeNormal=False)
     averageMAP_pc = float(np.mean(dmap_pc[:5]))
 
-    # Dual eval: threshold mAP always (model selection), BSN diagnostic
     agnostic_stack = [up1d(fs) for fs in ap1_per_video]
+
+    # All-videos threshold mAP
     dmap_thr, _ = getDetectionMAP_agnostic(agnostic_stack, gtsegments, gtlabels)
     avg_thr = float(np.mean(dmap_thr))
+
+    # Abnormal-only mAP (no FP from normal videos)
+    dmap_abn, _ = getDetectionMAP_abnormal_only(agnostic_stack, gtsegments, gtlabels)
+    avg_abn = float(np.mean(dmap_abn))
 
     bsn_stats = None
     dmap_bsn = None
     if inference == 'bsn':
-        # Snippet-resolution peak picking + offset refinement
         dmap_bsn, _, bsn_stats = getDetectionMAP_agnostic_bsn(
             ap1_per_video, start_cls_per_video, end_cls_per_video,
             gtsegments, gtlabels,
@@ -150,26 +156,21 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, d
 
     if not quiet:
         print(f"AUC1={ROC1:.4f} AP1={AP1:.4f} | AUC2={ROC2:.4f} AP2={AP2:.4f}")
-        pc_str = '/'.join(f'{v:.2f}' for v in dmap_pc[:5])
         thr_str = '/'.join(f'{v:.2f}' for v in dmap_thr[:5])
-        print(f"[per-class] AVG={averageMAP_pc:.2f} [{pc_str}]")
-        print(f"[threshold] AVG={avg_thr:.2f} [{thr_str}]")
-        if dmap_bsn is not None:
-            bsn_str = '/'.join(f'{v:.2f}' for v in dmap_bsn[:5])
-            avg_bsn = float(np.mean(dmap_bsn))
-            print(f"[BSN     ] AVG={avg_bsn:.2f} [{bsn_str}]")
-        if bsn_stats:
+        abn_str = '/'.join(f'{v:.2f}' for v in dmap_abn[:5])
+        print(f"[all-vid ] AVG={avg_thr:.2f} [{thr_str}]")
+        print(f"[abn-only] AVG={avg_abn:.2f} [{abn_str}]")
+        if bsn_stats and dmap_bsn is not None:
             st = bsn_stats
             avg_prop = st['total_nms_proposals'] / max(1, st['n_with_proposals'])
-            print(f"[BSN] {st['n_with_proposals']}/{st['n_videos']} videos with proposals, "
-                  f"{st['n_skipped']} skipped | "
-                  f"peaks: {st['total_starts']}s/{st['total_ends']}e | "
-                  f"proposals: {st['total_raw_proposals']} raw -> {st['total_nms_proposals']} nms "
-                  f"({avg_prop:.1f}/video) | "
-                  f"A:{st['n_anomaly_with_prop']}v/{st['n_anomaly_proposals']}p "
-                  f"N:{st['n_normal_with_prop']}v/{st['n_normal_proposals']}p")
+            avg_bsn = float(np.mean(dmap_bsn))
+            bsn_str = '/'.join(f'{v:.2f}' for v in dmap_bsn[:5])
+            print(f"[BSN    ] AVG={avg_bsn:.2f} [{bsn_str}] "
+                  f"{st['total_nms_proposals']}p({avg_prop:.1f}/v) "
+                  f"[A:{st['n_anomaly_with_prop']}v/{st['n_anomaly_proposals']}p "
+                  f"N:{st['n_normal_with_prop']}v/{st['n_normal_proposals']}p]")
 
-    return ROC1, avg_thr, dmap_thr, dmap_bsn, bsn_stats
+    return ROC1, avg_abn, dmap_abn, dmap_bsn, bsn_stats
 
 
 if __name__ == '__main__':

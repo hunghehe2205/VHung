@@ -280,17 +280,19 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             else:
                 loss_ctr = torch.zeros(1, device=device)
 
-            # Boundary start/end loss (Phase 2+, independent of lam1 since detached)
+            # Boundary loss — only on abnormal videos (second half of batch)
             bnd_gate = 1.0 if lam1 > 0 else 0.0
+            B_half = n_feat.shape[0]  # first B_half = normal, rest = anomaly
             if bnd_gate > 0 and args.lambda_boundary > 0:
                 if 'mask_T' not in locals():
                     logits1_2d_ = logits1.squeeze(-1)
                     mask_T = (torch.arange(logits1_2d_.shape[1], device=device)
                               .unsqueeze(0) < lengths.unsqueeze(1))
                 loss_bnd_cls, loss_bnd_off = boundary_offset_loss(
-                    start_logits, end_logits,
-                    s_cls_tgt, e_cls_tgt, s_off_tgt, e_off_tgt,
-                    mask_T, pos_weight=args.boundary_pos_weight,
+                    start_logits[B_half:], end_logits[B_half:],
+                    s_cls_tgt[B_half:], e_cls_tgt[B_half:],
+                    s_off_tgt[B_half:], e_off_tgt[B_half:],
+                    mask_T[B_half:], pos_weight=args.boundary_pos_weight,
                     return_components=True)
             else:
                 loss_bnd_cls = torch.zeros(1, device=device)
@@ -299,7 +301,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             loss = (loss_bce_v + loss_nce + loss_cts
                     + lam1 * loss_fbce + lam2 * loss_p3
                     + args.lambda_contrast * loss_ctr
-                    + bnd_gate * args.lambda_boundary * (loss_bnd_cls + loss_bnd_off))
+                    + bnd_gate * args.lambda_boundary * (loss_bnd_cls + 10.0 * loss_bnd_off))
 
             optimizer.zero_grad()
             loss.backward()
@@ -330,24 +332,23 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         avg_bnd_cls = sum_bnd_cls / n_iters
         avg_bnd_off = sum_bnd_off / n_iters
 
-        # End-of-epoch eval — dual eval: threshold for model selection, BSN diagnostic
-        AUC, avg_mAP_thr, dmap_thr, dmap_bsn, bsn_stats = test(
+        # End-of-epoch eval — model selection on abnormal-only mAP
+        AUC, avg_mAP_abn, dmap_abn, dmap_bsn, bsn_stats = test(
             model, testloader, args.visual_length, prompt_text,
             gt, gtsegments, gtlabels, device, quiet=True,
             inference=args.inference,
             bsn_start_thresh=args.bsn_start_thresh,
             bsn_end_thresh=args.bsn_end_thresh,
             bsn_max_dur=args.bsn_max_dur)
-        thr_str = '/'.join(f'{v:.2f}' for v in dmap_thr[:5])
-        is_best = avg_mAP_thr > ap_best
+        abn_str = '/'.join(f'{v:.2f}' for v in dmap_abn[:5])
+        is_best = avg_mAP_abn > ap_best
         tag = ' *' if is_best else ''
         bsn_str = ''
         if bsn_stats and dmap_bsn is not None:
             st = bsn_stats
             avg_prop = st['total_nms_proposals'] / max(1, st['n_with_proposals'])
             avg_bsn = float(np.mean(dmap_bsn))
-            bsn_str = (f' | BSN={avg_bsn:.2f} {st["n_with_proposals"]}/{st["n_videos"]}v '
-                       f'{st["total_nms_proposals"]}p({avg_prop:.1f}/v) '
+            bsn_str = (f' | BSN={avg_bsn:.2f} '
                        f'[A:{st["n_anomaly_with_prop"]}v/{st["n_anomaly_proposals"]}p '
                        f'N:{st["n_normal_with_prop"]}v/{st["n_normal_proposals"]}p]')
         print(f'[ep {e+1:2d}/{args.max_epoch} {train_secs:.0f}s] '
@@ -355,10 +356,10 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
               f'bce_v={avg_bce_v:.3f} nce={avg_nce:.3f} cts={avg_cts:.4f} '
               f'fbce={avg_fbce:.3f} p3={avg_p3:.3f} ctr={avg_ctr:.3f} '
               f'bnd_cls={avg_bnd_cls:.3f} bnd_off={avg_bnd_off:.3f} | '
-              f'AUC={AUC:.4f} mAP={avg_mAP_thr:.2f} [{thr_str}]{bsn_str}{tag}',
+              f'AUC={AUC:.4f} mAP_abn={avg_mAP_abn:.2f} [{abn_str}]{bsn_str}{tag}',
               flush=True)
         if is_best:
-            ap_best = avg_mAP_thr
+            ap_best = avg_mAP_abn
             torch.save({'epoch': e,
                         'model_state_dict': model.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),

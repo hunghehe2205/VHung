@@ -225,6 +225,80 @@ def getDetectionMAP_agnostic(predictions, gtsegments, gtlabels):
     return dmap_list, iou_list
 
 
+def _loc_map_abnormal_only(predictions, th, gtsegments, gtlabels,
+                           threshold_rel=0.6, **kw):
+    """mAP computed only on abnormal videos (skip normal entirely)."""
+    segment_predict = []
+    for i in range(len(predictions)):
+        if not any(l != 'A' for l in gtlabels[i]):
+            continue
+        tmp = predictions[i]
+        if tmp.max() == tmp.min():
+            continue
+        pp = np.sort(tmp)[::-1]
+        c_s = float(np.mean(pp[:max(1, int(len(pp) / 16))]))
+        threshold = tmp.max() - (tmp.max() - tmp.min()) * threshold_rel
+        vid_pred = np.concatenate([np.zeros(1),
+                                   (tmp > threshold).astype('float32'),
+                                   np.zeros(1)], axis=0)
+        vid_pred_diff = [vid_pred[t] - vid_pred[t - 1]
+                         for t in range(1, len(vid_pred))]
+        s = [k for k, item in enumerate(vid_pred_diff) if item == 1]
+        e = [k for k, item in enumerate(vid_pred_diff) if item == -1]
+        for j in range(len(s)):
+            if e[j] - s[j] >= 2:
+                score = float(np.max(tmp[s[j]:e[j]])) + 0.7 * c_s
+                segment_predict.append([i, s[j], e[j], score])
+    if not segment_predict:
+        return 0.0
+    segment_predict = np.array(segment_predict)
+    segment_predict = segment_predict[np.argsort(-segment_predict[:, 3])]
+
+    segment_gt = [[i, gtsegments[i][j][0], gtsegments[i][j][1]]
+                  for i in range(len(gtsegments))
+                  for j in range(len(gtsegments[i]))
+                  if gtlabels[i][j] != 'A']
+    gtpos = len(segment_gt)
+    if gtpos == 0:
+        return 0.0
+    tp, fp = [], []
+    for i in range(len(segment_predict)):
+        flag = 0.0
+        best_iou = 0.0
+        best_j = -1
+        for j in range(len(segment_gt)):
+            if segment_predict[i][0] == segment_gt[j][0]:
+                gt = range(int(segment_gt[j][1]), int(segment_gt[j][2]))
+                p = range(int(segment_predict[i][1]), int(segment_predict[i][2]))
+                inter = len(set(gt).intersection(set(p)))
+                union = len(set(gt).union(set(p)))
+                if union == 0:
+                    continue
+                IoU = float(inter) / float(union)
+                if IoU >= th and IoU > best_iou:
+                    flag = 1.0
+                    best_iou = IoU
+                    best_j = j
+        if flag > 0 and best_j >= 0:
+            del segment_gt[best_j]
+        tp.append(flag)
+        fp.append(1.0 - flag)
+    tp_c = np.cumsum(tp)
+    fp_c = np.cumsum(fp)
+    if sum(tp) == 0:
+        return 0.0
+    prc = np.sum((tp_c / (fp_c + tp_c)) * np.array(tp)) / gtpos
+    return 100.0 * prc
+
+
+def getDetectionMAP_abnormal_only(predictions, gtsegments, gtlabels, **kw):
+    """Abnormal-only version: skip normal videos entirely."""
+    iou_list = [0.1, 0.2, 0.3, 0.4, 0.5]
+    dmap_list = [_loc_map_abnormal_only(predictions, iou, gtsegments, gtlabels, **kw)
+                 for iou in iou_list]
+    return dmap_list, iou_list
+
+
 # --------------- BSN-style proposal generation ---------------
 
 def _peak_pick(prob, rel_thresh):

@@ -130,15 +130,13 @@ def focal_bce_loss(logits, target, mask, pos_weight, gamma=2.0):
 
 
 def get_lambda(epoch, phase1_epochs, phase2_epochs, lambda1, lambda2):
-    """3-phase schedule for extra losses.
-    epoch < phase1_epochs:                return (0, 0)       # MIL-only warmup
-    phase1_epochs <= epoch < phase2_epochs: return (lambda1, 0) # +frame BCE
-    epoch >= phase2_epochs:                return (lambda1, lambda2) # +IoU
+    """2-phase schedule for extra losses.
+    epoch < phase1_epochs: return (0, 0)                # MIL-only warmup
+    epoch >= phase1_epochs: return (lambda1, lambda2)    # BCE + BSN + Dice/Contrast all active
+    phase2_epochs kept in signature for CLI compat but unused.
     """
     if epoch < phase1_epochs:
         return 0.0, 0.0
-    elif epoch < phase2_epochs:
-        return float(lambda1), 0.0
     else:
         return float(lambda1), float(lambda2)
 

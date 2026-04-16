@@ -174,10 +174,11 @@ def _loc_map_agnostic(predictions, th, gtsegments, gtlabels):
         return 0.0
     segment_predict = segment_predict[np.argsort(-segment_predict[:, 3])]
 
-    # Collapse ALL GT segments (any class) into a single "anomaly" class
+    # Collapse anomaly GT segments into a single class; exclude Normal ('A')
     segment_gt = [[i, gtsegments[i][j][0], gtsegments[i][j][1]]
                   for i in range(len(gtsegments))
-                  for j in range(len(gtsegments[i]))]
+                  for j in range(len(gtsegments[i]))
+                  if gtlabels[i][j] != 'A']
     gtpos = len(segment_gt)
     if gtpos == 0:
         return 0.0
@@ -240,7 +241,7 @@ def _peak_pick(prob, rel_thresh):
     return peaks
 
 
-def _iou_matching_ap(segment_predict, gtsegments, th):
+def _iou_matching_ap(segment_predict, gtsegments, gtlabels, th):
     """Shared IoU matching + AP computation (used by both threshold and BSN)."""
     if len(segment_predict) == 0:
         return 0.0
@@ -249,7 +250,8 @@ def _iou_matching_ap(segment_predict, gtsegments, th):
 
     segment_gt = [[i, gtsegments[i][j][0], gtsegments[i][j][1]]
                   for i in range(len(gtsegments))
-                  for j in range(len(gtsegments[i]))]
+                  for j in range(len(gtsegments[i]))
+                  if gtlabels[i][j] != 'A']
     gtpos = len(segment_gt)
     if gtpos == 0:
         return 0.0
@@ -323,7 +325,7 @@ def _loc_map_agnostic_bsn(predictions, start_preds, end_preds, th,
             _, keep = nms(arr[:, 1:-1], 0.6)
             segment_predict.extend(list(arr[keep]))
 
-    return _iou_matching_ap(segment_predict, gtsegments, th)
+    return _iou_matching_ap(segment_predict, gtsegments, gtlabels, th)
 
 
 def getDetectionMAP_agnostic_bsn(predictions, start_preds, end_preds,

@@ -228,16 +228,31 @@ def getDetectionMAP_agnostic(predictions, gtsegments, gtlabels):
 # --------------- BSN-style proposal generation ---------------
 
 def _peak_pick(prob, rel_thresh):
-    """Local maxima on 1-D array, keep peaks > rel_thresh * max."""
+    """Plateau-aware local maxima on 1-D array.
+    After np.repeat(×16), a single-snippet peak becomes a 16-frame plateau.
+    Finds contiguous runs of equal value that form a local maximum above
+    rel_thresh * max, returns the midpoint of each plateau.
+    """
     if len(prob) < 2 or prob.max() <= 0:
         return []
     thr = rel_thresh * prob.max()
     peaks = []
-    for t in range(len(prob)):
-        l = prob[t - 1] if t > 0 else -1e9
-        r = prob[t + 1] if t < len(prob) - 1 else -1e9
-        if prob[t] >= l and prob[t] >= r and prob[t] > thr:
-            peaks.append(t)
+    t = 0
+    n = len(prob)
+    while t < n:
+        if prob[t] <= thr:
+            t += 1
+            continue
+        # Find extent of plateau (contiguous run of equal value)
+        end = t
+        while end + 1 < n and prob[end + 1] == prob[t]:
+            end += 1
+        # Check if this plateau is a local maximum
+        left_val = prob[t - 1] if t > 0 else -1e9
+        right_val = prob[end + 1] if end + 1 < n else -1e9
+        if prob[t] > left_val and prob[t] > right_val:
+            peaks.append((t + end) // 2)
+        t = end + 1
     return peaks
 
 
@@ -295,30 +310,19 @@ def _loc_map_agnostic_bsn(predictions, start_preds, end_preds, th,
         starts = _peak_pick(sp, start_thr)
         ends = _peak_pick(ep, end_thr)
         if not starts or not ends:
-            # Fallback: use actionness-only threshold proposal for this video
-            pp = np.sort(act)[::-1]
-            c_s = np.mean(pp[:max(1, int(len(pp) / 16))])
-            if act.max() == act.min():
-                continue
-            threshold = act.max() - (act.max() - act.min()) * 0.6
-            vid_pred = np.concatenate([np.zeros(1),
-                                       (act > threshold).astype('float32'),
-                                       np.zeros(1)])
-            vid_pred_diff = [vid_pred[t] - vid_pred[t-1] for t in range(1, len(vid_pred))]
-            s_list = [k for k, v in enumerate(vid_pred_diff) if v == 1]
-            e_list = [k for k, v in enumerate(vid_pred_diff) if v == -1]
-            for j in range(len(s_list)):
-                if e_list[j] - s_list[j] >= 2:
-                    score = float(np.max(act[s_list[j]:e_list[j]])) + 0.7 * c_s
-                    segment_predict.append([i, s_list[j], e_list[j], score])
+            # No boundary peaks detected — skip this video.
+            # Mixing threshold-fallback scores (max + 0.7*c_s ~ 1.0+) with
+            # BSN scores (sp*ep*mean ~ 0.01-0.1) corrupts the global ranking.
             continue
+        pp = np.sort(act)[::-1]
+        c_s = float(np.mean(pp[:max(1, int(len(pp) / 16))]))
         proposals = []
         for s in starts:
             for e in ends:
                 if e <= s or (e - s) > max_dur or (e - s) < 2:
                     continue
-                score = float(sp[s] * ep[e] * act[s:e + 1].mean())
-                proposals.append([i, s, e, score])
+                score = float(sp[s] * ep[e] * act[s:e + 1].mean()) + 0.7 * c_s
+                proposals.append([i, s, e + 1, score])  # exclusive end to match range() IoU
         if proposals:
             arr = np.array(proposals)
             arr = arr[np.argsort(-arr[:, -1])]

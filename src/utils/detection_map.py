@@ -322,14 +322,12 @@ def _bsn_generate_proposals(predictions, start_preds, end_preds,
             continue
         total_starts += len(starts)
         total_ends += len(ends)
-        pp = np.sort(act)[::-1]
-        c_s = float(np.mean(pp[:max(1, int(len(pp) / 16))]))
         proposals = []
         for s in starts:
             for e in ends:
                 if e <= s or (e - s) > max_dur or (e - s) < 2:
                     continue
-                score = float(sp[s] * ep[e] * act[s:e + 1].mean()) + 0.7 * c_s
+                score = float(sp[s] * ep[e] * act[s:e + 1].mean())
                 proposals.append([i, s, e + 1, score])  # exclusive end to match range() IoU
         total_raw_proposals += len(proposals)
         if proposals:

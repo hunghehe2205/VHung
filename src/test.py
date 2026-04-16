@@ -165,7 +165,9 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, d
                   f"{st['n_skipped']} skipped | "
                   f"peaks: {st['total_starts']}s/{st['total_ends']}e | "
                   f"proposals: {st['total_raw_proposals']} raw -> {st['total_nms_proposals']} nms "
-                  f"({avg_prop:.1f}/video)")
+                  f"({avg_prop:.1f}/video) | "
+                  f"A:{st['n_anomaly_with_prop']}v/{st['n_anomaly_proposals']}p "
+                  f"N:{st['n_normal_with_prop']}v/{st['n_normal_proposals']}p")
 
     return ROC1, avg_thr, dmap_thr, dmap_bsn, bsn_stats
 

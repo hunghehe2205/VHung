@@ -124,10 +124,10 @@ def main():
                     args.attn_window, args.prompt_prefix, args.prompt_postfix,
                     device)
     model.load_state_dict(torch.load(args.model_path, weights_only=False,
-                                     map_location=device))
+                                     map_location=device), strict=False)
     model.to(device).eval()
 
-    out_root = os.path.join('docs', 'anomaly_maps')
+    out_root = args.out_dir
     maxlen = args.visual_length
 
     paths = list(testdataset.df['path'])

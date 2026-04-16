@@ -301,12 +301,21 @@ def _iou_matching_ap(segment_predict, gtsegments, gtlabels, th):
     return 100.0 * prc
 
 
+def _is_anomaly_video(gtlabels, video_idx):
+    """True if video has at least one non-Normal GT segment."""
+    if video_idx >= len(gtlabels):
+        return False
+    return any(l != 'A' for l in gtlabels[video_idx])
+
+
 def _bsn_generate_proposals(predictions, start_preds, end_preds,
                              start_thr=0.5, end_thr=0.5, max_dur=2048,
-                             start_offs=None, end_offs=None, clip_len=16):
+                             start_offs=None, end_offs=None, clip_len=16,
+                             gtlabels=None):
     """Peak-pick at snippet resolution, refine with offsets to frame resolution.
     predictions, start_preds, end_preds: lists of snippet-resolution 1-D arrays.
     start_offs, end_offs: lists of snippet-resolution offset arrays (optional).
+    gtlabels: if provided, splits proposal stats by anomaly/normal videos.
     Returns (segment_predict, stats_dict)."""
     n_videos = len(predictions)
     segment_predict = []
@@ -316,8 +325,13 @@ def _bsn_generate_proposals(predictions, start_preds, end_preds,
     total_ends = 0
     total_raw_proposals = 0
     total_nms_proposals = 0
+    n_anomaly_with_prop = 0
+    n_normal_with_prop = 0
+    n_anomaly_proposals = 0
+    n_normal_proposals = 0
 
     for i, (act, sp, ep) in enumerate(zip(predictions, start_preds, end_preds)):
+        is_anom = _is_anomaly_video(gtlabels, i) if gtlabels is not None else None
         starts = _peak_pick(sp, start_thr)
         ends = _peak_pick(ep, end_thr)
         if not starts or not ends:
@@ -348,8 +362,15 @@ def _bsn_generate_proposals(predictions, start_preds, end_preds,
             arr = arr[np.argsort(-arr[:, -1])]
             _, keep = nms(arr[:, 1:-1], 0.6)
             kept = list(arr[keep])
-            total_nms_proposals += len(kept)
+            n_kept = len(kept)
+            total_nms_proposals += n_kept
             segment_predict.extend(kept)
+            if is_anom is True:
+                n_anomaly_with_prop += 1
+                n_anomaly_proposals += n_kept
+            elif is_anom is False:
+                n_normal_with_prop += 1
+                n_normal_proposals += n_kept
 
     stats = {
         'n_videos': n_videos,
@@ -359,6 +380,10 @@ def _bsn_generate_proposals(predictions, start_preds, end_preds,
         'total_ends': total_ends,
         'total_raw_proposals': total_raw_proposals,
         'total_nms_proposals': total_nms_proposals,
+        'n_anomaly_with_prop': n_anomaly_with_prop,
+        'n_normal_with_prop': n_normal_with_prop,
+        'n_anomaly_proposals': n_anomaly_proposals,
+        'n_normal_proposals': n_normal_proposals,
     }
     return segment_predict, stats
 
@@ -368,7 +393,7 @@ def getDetectionMAP_agnostic_bsn(predictions, start_preds, end_preds,
     """BSN variant of getDetectionMAP_agnostic.
     Returns (dmap_list, iou_list, bsn_stats)."""
     segment_predict, stats = _bsn_generate_proposals(
-        predictions, start_preds, end_preds, **kw)
+        predictions, start_preds, end_preds, gtlabels=gtlabels, **kw)
     iou_list = [0.1, 0.2, 0.3, 0.4, 0.5]
     dmap_list = [_iou_matching_ap(segment_predict, gtsegments, gtlabels, iou)
                  for iou in iou_list]

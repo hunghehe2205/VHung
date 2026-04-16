@@ -67,3 +67,5 @@ parser.add_argument('--upsample', default='repeat', choices=['repeat', 'linear']
                     help='Eval upsample mode: step-function (repeat) or linear interp')
 parser.add_argument('--normalize', action='store_true',
                     help='Viz: min-max normalize prob per video to see shape')
+parser.add_argument('--out-dir', default='docs/anomaly_maps',
+                    help='Root output directory for anomaly map PNGs')

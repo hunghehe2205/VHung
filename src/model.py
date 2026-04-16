@@ -98,8 +98,11 @@ class CLIPVAD(nn.Module):
             ("c_proj", nn.Linear(visual_width * 4, visual_width))
         ]))
         self.classifier = nn.Linear(visual_width, 1)
-        self.start_head = nn.Linear(visual_width, 1)
-        self.end_head = nn.Linear(visual_width, 1)
+        # Boundary heads — cls gets gradient to backbone, off is detached
+        self.start_head_cls = nn.Linear(visual_width, 1)
+        self.start_head_off = nn.Linear(visual_width, 1)
+        self.end_head_cls = nn.Linear(visual_width, 1)
+        self.end_head_off = nn.Linear(visual_width, 1)
 
         self.clipmodel, _ = clip.load("ViT-B/16", device)
         for clip_param in self.clipmodel.parameters():
@@ -185,11 +188,18 @@ class CLIPVAD(nn.Module):
     def forward(self, visual, padding_mask, text, lengths):
         visual_features, x_pre = self.encode_video(visual, padding_mask, lengths)
         logits1 = self.classifier(visual_features + self.mlp2(visual_features))
-        # Boundary heads: detached x_pre + x_diff, separate optimizer handles LR
-        x_pre_d = x_pre.detach()
-        x_diff = F.pad(x_pre_d[:, 1:] - x_pre_d[:, :-1], (0, 0, 0, 1))
-        start_logits = self.start_head(x_pre_d + x_diff)   # [B, T, 1]
-        end_logits = self.end_head(x_pre_d - x_diff)        # [B, T, 1]
+        # Cls heads: gradient flows to backbone (selective backprop)
+        x_diff = F.pad(x_pre[:, 1:] - x_pre[:, :-1], (0, 0, 0, 1))  # [B, T, D]
+        start_cls = self.start_head_cls(x_pre + x_diff)    # [B, T, 1]
+        end_cls = self.end_head_cls(x_pre - x_diff)          # [B, T, 1]
+        # Off heads: detached — no backprop into backbone
+        x_pre_sg = x_pre.detach()
+        x_diff_sg = F.pad(x_pre_sg[:, 1:] - x_pre_sg[:, :-1], (0, 0, 0, 1))
+        start_off = self.start_head_off(x_pre_sg + x_diff_sg)  # [B, T, 1]
+        end_off = self.end_head_off(x_pre_sg - x_diff_sg)       # [B, T, 1]
+        # Stack → [B, T, 2] for interface compatibility
+        start_logits = torch.cat([start_cls, start_off], dim=-1)
+        end_logits = torch.cat([end_cls, end_off], dim=-1)
 
         text_features_ori = self.encode_textprompt(text)
 

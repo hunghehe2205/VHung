@@ -143,18 +143,32 @@ def get_lambda(epoch, phase1_epochs, phase2_epochs, lambda1, lambda2):
         return float(lambda1), float(lambda2)
 
 
-def boundary_cls_loss(start_logits, end_logits, start_tgt, end_tgt,
-                      mask, pos_weight=10.0):
-    """BCE for Gaussian-smoothed start/end cls targets.
-    start_logits/end_logits: [B, T, 1]. start_tgt/end_tgt: [B, T] soft targets.
+def boundary_offset_loss(start_logits, end_logits,
+                         start_cls_tgt, end_cls_tgt,
+                         start_off_tgt, end_off_tgt,
+                         mask, pos_weight=10.0, return_components=False):
+    """BCE for start/end classification + smooth L1 for offset at positive snippets.
+    start_logits/end_logits: [B, T, 2] — channel 0 = cls logit, channel 1 = offset logit.
     """
     pw = torch.tensor([pos_weight], device=mask.device)
-    s = start_logits.squeeze(-1)   # [B, T]
-    e = end_logits.squeeze(-1)
-    loss = (
-        F.binary_cross_entropy_with_logits(s[mask], start_tgt[mask], pos_weight=pw) +
-        F.binary_cross_entropy_with_logits(e[mask], end_tgt[mask], pos_weight=pw))
-    return loss
+    s_cls = start_logits[..., 0]   # [B, T]
+    e_cls = end_logits[..., 0]
+    loss_cls = (
+        F.binary_cross_entropy_with_logits(s_cls[mask], start_cls_tgt[mask], pos_weight=pw) +
+        F.binary_cross_entropy_with_logits(e_cls[mask], end_cls_tgt[mask], pos_weight=pw))
+
+    s_off = torch.sigmoid(start_logits[..., 1])
+    e_off = torch.sigmoid(end_logits[..., 1])
+    s_pos = (start_cls_tgt > 0.5) & mask
+    e_pos = (end_cls_tgt > 0.5) & mask
+    loss_off = torch.zeros(1, device=mask.device)
+    if s_pos.any():
+        loss_off = loss_off + F.smooth_l1_loss(s_off[s_pos], start_off_tgt[s_pos])
+    if e_pos.any():
+        loss_off = loss_off + F.smooth_l1_loss(e_off[e_pos], end_off_tgt[e_pos])
+    if return_components:
+        return loss_cls, loss_off
+    return loss_cls + loss_off
 
 
 def train(model, normal_loader, anomaly_loader, testloader, args, label_map, device):
@@ -163,11 +177,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
     gtsegments = np.load(args.gt_segment_path, allow_pickle=True)
     gtlabels = np.load(args.gt_label_path, allow_pickle=True)
 
-    head_params = list(model.start_head.parameters()) + list(model.end_head.parameters())
-    head_ids = {id(p) for p in head_params}
-    backbone_params = [p for p in model.parameters() if id(p) not in head_ids]
-    optimizer = torch.optim.AdamW(backbone_params, lr=args.lr)
-    head_optimizer = torch.optim.AdamW(head_params, lr=args.head_lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     scheduler = MultiStepLR(optimizer, args.scheduler_milestones, args.scheduler_rate)
     prompt_text = get_prompt_text(label_map)
 
@@ -187,8 +197,6 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                                 map_location=device)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        if 'head_optimizer_state_dict' in checkpoint:
-            head_optimizer.load_state_dict(checkpoint['head_optimizer_state_dict'])
         start_epoch = checkpoint['epoch']
         ap_best = checkpoint['ap']
         print('checkpoint info: epoch', start_epoch + 1, 'avg_mAP', ap_best)
@@ -200,7 +208,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                                 args.lambda1, args.lambda2)
         model.train()
         sum_bce_v = sum_nce = sum_cts = sum_fbce = sum_p3 = sum_ctr = 0.0
-        sum_bnd = 0.0
+        sum_bnd_cls = sum_bnd_off = 0.0
         n_iters = min(len(normal_loader), len(anomaly_loader))
         t_start = time.time()
         pbar = tqdm(range(n_iters),
@@ -216,9 +224,11 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
 
             visual = torch.cat([n_feat, a_feat], dim=0).to(device)
             y_bin = torch.cat([n_ybin, a_ybin], dim=0).to(device)        # [2B, T]
-            bnd_targets = torch.cat([n_bnd, a_bnd], dim=0).to(device)    # [2B, 2, T]
+            bnd_targets = torch.cat([n_bnd, a_bnd], dim=0).to(device)    # [2B, 4, T]
             s_cls_tgt = bnd_targets[:, 0]  # [2B, T]
             e_cls_tgt = bnd_targets[:, 1]
+            s_off_tgt = bnd_targets[:, 2]
+            e_off_tgt = bnd_targets[:, 3]
             text_labels = list(n_lab) + list(a_lab)
             lengths = torch.cat([n_len, a_len], dim=0).to(device)
             text_labels_t = get_batch_label(text_labels, prompt_text, label_map).to(device)
@@ -237,19 +247,18 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                 loss_cts += torch.abs(tf_n @ tf_a)
             loss_cts = loss_cts / 13 * 1e-1
 
-            # Localization losses — anomaly videos only (second half of batch)
-            B_half = n_feat.shape[0]
+            # New losses (phase-gated)
             if lam1 > 0:
                 logits1_2d = logits1.squeeze(-1)                          # [2B, T]
                 mask_T = (torch.arange(logits1_2d.shape[1], device=device)
                           .unsqueeze(0) < lengths.unsqueeze(1))            # [2B, T]
                 if args.focal_gamma > 0:
-                    loss_fbce = focal_bce_loss(logits1_2d[B_half:], y_bin[B_half:],
-                                               mask_T[B_half:], pos_weight_bin,
+                    loss_fbce = focal_bce_loss(logits1_2d, y_bin, mask_T,
+                                               pos_weight_bin,
                                                gamma=args.focal_gamma)
                 else:
-                    loss_fbce = frame_bce_loss(logits1_2d[B_half:], y_bin[B_half:],
-                                               mask_T[B_half:], pos_weight_bin)
+                    loss_fbce = frame_bce_loss(logits1_2d, y_bin, mask_T,
+                                               pos_weight_bin)
             else:
                 loss_fbce = torch.zeros(1, device=device)
 
@@ -271,30 +280,32 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             else:
                 loss_ctr = torch.zeros(1, device=device)
 
-            # Boundary loss — anomaly only
+            # Boundary loss — only on abnormal videos (second half of batch)
             bnd_gate = 1.0 if lam1 > 0 else 0.0
+            B_half = n_feat.shape[0]  # first B_half = normal, rest = anomaly
             if bnd_gate > 0 and args.lambda_boundary > 0:
                 if 'mask_T' not in locals():
                     logits1_2d_ = logits1.squeeze(-1)
                     mask_T = (torch.arange(logits1_2d_.shape[1], device=device)
                               .unsqueeze(0) < lengths.unsqueeze(1))
-                loss_bnd = boundary_cls_loss(
+                loss_bnd_cls, loss_bnd_off = boundary_offset_loss(
                     start_logits[B_half:], end_logits[B_half:],
                     s_cls_tgt[B_half:], e_cls_tgt[B_half:],
-                    mask_T[B_half:], pos_weight=args.boundary_pos_weight)
+                    s_off_tgt[B_half:], e_off_tgt[B_half:],
+                    mask_T[B_half:], pos_weight=args.boundary_pos_weight,
+                    return_components=True)
             else:
-                loss_bnd = torch.zeros(1, device=device)
+                loss_bnd_cls = torch.zeros(1, device=device)
+                loss_bnd_off = torch.zeros(1, device=device)
 
             loss = (loss_bce_v + loss_nce + loss_cts
                     + lam1 * loss_fbce + lam2 * loss_p3
                     + args.lambda_contrast * loss_ctr
-                    + bnd_gate * args.lambda_boundary * loss_bnd)
+                    + bnd_gate * args.lambda_boundary * (loss_bnd_cls + 10.0 * loss_bnd_off))
 
             optimizer.zero_grad()
-            head_optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            head_optimizer.step()
 
             sum_bce_v += float(loss_bce_v)
             sum_nce   += float(loss_nce)
@@ -302,7 +313,8 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             sum_fbce  += float(loss_fbce)
             sum_p3    += float(loss_p3)
             sum_ctr   += float(loss_ctr)
-            sum_bnd   += float(loss_bnd)
+            sum_bnd_cls += float(loss_bnd_cls)
+            sum_bnd_off += float(loss_bnd_off)
             pbar.set_postfix(bce_v=sum_bce_v / (i + 1),
                              nce=sum_nce / (i + 1),
                              cts=sum_cts / (i + 1),
@@ -317,7 +329,8 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         avg_fbce = sum_fbce / n_iters
         avg_p3 = sum_p3 / n_iters
         avg_ctr = sum_ctr / n_iters
-        avg_bnd = sum_bnd / n_iters
+        avg_bnd_cls = sum_bnd_cls / n_iters
+        avg_bnd_off = sum_bnd_off / n_iters
 
         # End-of-epoch eval — model selection on abnormal-only mAP
         AUC, avg_mAP_abn, dmap_abn, dmap_bsn, bsn_stats = test(
@@ -338,12 +351,11 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             bsn_str = (f' | BSN={avg_bsn:.2f} '
                        f'[A:{st["n_anomaly_with_prop"]}v/{st["n_anomaly_proposals"]}p '
                        f'N:{st["n_normal_with_prop"]}v/{st["n_normal_proposals"]}p]')
-        head_lr_cur = head_optimizer.param_groups[0]['lr']
         print(f'[ep {e+1:2d}/{args.max_epoch} {train_secs:.0f}s] '
-              f'lam=({lam1},{lam2}) hlr={head_lr_cur:.0e} | '
+              f'lam=({lam1},{lam2}) | '
               f'bce_v={avg_bce_v:.3f} nce={avg_nce:.3f} cts={avg_cts:.4f} '
               f'fbce={avg_fbce:.3f} p3={avg_p3:.3f} ctr={avg_ctr:.3f} '
-              f'bnd={avg_bnd:.3f} | '
+              f'bnd_cls={avg_bnd_cls:.3f} bnd_off={avg_bnd_off:.3f} | '
               f'AUC={AUC:.4f} mAP_abn={avg_mAP_abn:.2f} [{abn_str}]{bsn_str}{tag}',
               flush=True)
         if is_best:
@@ -351,7 +363,6 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             torch.save({'epoch': e,
                         'model_state_dict': model.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
-                        'head_optimizer_state_dict': head_optimizer.state_dict(),
                         'ap': ap_best}, args.checkpoint_path)
 
         scheduler.step()
@@ -379,12 +390,12 @@ if __name__ == '__main__':
 
     normal_dataset = UCFDataset(
         args.visual_length, args.train_list, False, label_map, True,
-        json_path=args.train_json, boundary_sigma=args.boundary_sigma)
+        json_path=args.train_json)
     normal_loader = DataLoader(normal_dataset, batch_size=args.batch_size,
                                shuffle=True, drop_last=True)
     anomaly_dataset = UCFDataset(
         args.visual_length, args.train_list, False, label_map, False,
-        json_path=args.train_json, boundary_sigma=args.boundary_sigma)
+        json_path=args.train_json)
     anomaly_loader = DataLoader(anomaly_dataset, batch_size=args.batch_size,
                                 shuffle=True, drop_last=True)
 

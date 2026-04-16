@@ -25,10 +25,7 @@ class GraphConvolution(Module):
         elif in_features == out_features:
             self.residual = lambda x: x
         else:
-            # kernel_size=1 (pure projection) instead of k=5 — k=5 made the
-            # residual path act as a low-pass filter, erasing sharp boundary
-            # signal. k=1 lets sharp features pass through unsmoothed.
-            self.residual = nn.Conv1d(in_channels=in_features, out_channels=out_features, kernel_size=1, padding=0)
+            self.residual = nn.Conv1d(in_channels=in_features, out_channels=out_features, kernel_size=5, padding=2)
 
     def reset_parameters(self):
         nn.init.xavier_uniform_(self.weight)

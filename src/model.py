@@ -2,6 +2,7 @@ from collections import OrderedDict
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import nn
 from clip import clip
 from utils.layers import GraphConvolution, DistanceAdj
@@ -78,10 +79,11 @@ class CLIPVAD(nn.Module):
         )
 
         width = int(visual_width / 2)
+        self.gc1 = GraphConvolution(visual_width, width, residual=True)
+        self.gc2 = GraphConvolution(width, width, residual=True)
         self.gc3 = GraphConvolution(visual_width, width, residual=True)
         self.gc4 = GraphConvolution(width, width, residual=True)
         self.disAdj = DistanceAdj()
-        self.pre_proj = nn.Linear(visual_width, width)
         self.linear = nn.Linear(visual_width, visual_width)
         self.gelu = QuickGELU()
 
@@ -111,17 +113,41 @@ class CLIPVAD(nn.Module):
         nn.init.normal_(self.frame_position_embeddings.weight, std=0.01)
 
     def build_attention_mask(self, attn_window):
-        # Block-diagonal mask: snippet i attends only within block
-        # [i//W * W, (i//W+1) * W]. Reverted from sliding-window (Exp 7) —
-        # sliding with window=8 over 2 layers had effective RF of 17 snippets,
-        # smoother than block-diag and hurt strict IoU (@0.4/@0.5).
-        mask = torch.empty(self.visual_length, self.visual_length)
-        mask.fill_(float('-inf'))
-        for i in range(0, self.visual_length, attn_window):
-            mask[i: i + attn_window, i: i + attn_window] = 0
+        # Sliding-window mask: snippet i attends to [i - half, i + half].
+        # Replaces block-diagonal (non-overlapping) — gives continuous temporal
+        # context across former block boundaries so event boundaries are not
+        # cut off. See docs/.../2026-04-16-experiments-log.md Exp 7.
+        T = self.visual_length
+        mask = torch.full((T, T), float('-inf'))
+        half = attn_window // 2
+        for i in range(T):
+            lo = max(0, i - half)
+            hi = min(T, i + half + 1)
+            mask[i, lo:hi] = 0
         return mask
 
-    def encode_video(self, images):
+    def adj4(self, x, seq_len):
+        soft = nn.Softmax(1)
+        x2 = x.matmul(x.permute(0, 2, 1))
+        x_norm = torch.norm(x, p=2, dim=2, keepdim=True)
+        x_norm_x = x_norm.matmul(x_norm.permute(0, 2, 1))
+        x2 = x2 / (x_norm_x + 1e-20)
+        output = torch.zeros_like(x2)
+        if seq_len is None:
+            for i in range(x.shape[0]):
+                tmp = x2[i]
+                adj2 = F.threshold(tmp, 0.7, 0)
+                adj2 = soft(adj2)
+                output[i] = adj2
+        else:
+            for i in range(len(seq_len)):
+                tmp = x2[i, :seq_len[i], :seq_len[i]]
+                adj2 = F.threshold(tmp, 0.7, 0)
+                adj2 = soft(adj2)
+                output[i, :seq_len[i], :seq_len[i]] = adj2
+        return output
+
+    def encode_video(self, images, padding_mask, lengths):
         images = images.to(torch.float)
         position_ids = torch.arange(self.visual_length, device=self.device)
         position_ids = position_ids.unsqueeze(0).expand(images.shape[0], -1)
@@ -130,16 +156,15 @@ class CLIPVAD(nn.Module):
         images = images.permute(1, 0, 2) + frame_position_embeddings
 
         x, _ = self.temporal((images, None))
-        x = x.permute(1, 0, 2)  # x_pre: [B, T, D] — boundary-sharp transformer output
+        x = x.permute(1, 0, 2)
 
-        # Distance GCN branch (local low-pass, preserved)
+        adj = self.adj4(x, lengths)
         disadj = self.disAdj(x.shape[0], x.shape[1])
+        x1_h = self.gelu(self.gc1(x, adj))
         x2_h = self.gelu(self.gc3(x, disadj))
-        x2 = self.gelu(self.gc4(x2_h, disadj))
 
-        # Sharp branch: linear projection of x_pre (replaces removed similarity GCN).
-        # No temporal smoothing — preserves event boundaries.
-        x1 = self.gelu(self.pre_proj(x))
+        x1 = self.gelu(self.gc2(x1_h, adj))
+        x2 = self.gelu(self.gc4(x2_h, disadj))
 
         x = torch.cat((x1, x2), 2)
         x = self.linear(x)
@@ -162,7 +187,7 @@ class CLIPVAD(nn.Module):
         return text_features
 
     def forward(self, visual, padding_mask, text, lengths):
-        visual_features = self.encode_video(visual)
+        visual_features = self.encode_video(visual, padding_mask, lengths)
         logits1 = self.classifier(visual_features + self.mlp2(visual_features))
 
         text_features_ori = self.encode_textprompt(text)

@@ -147,7 +147,7 @@ def _loc_map_agnostic(predictions, th, gtsegments, gtlabels):
     for i in range(videos_num):
         tmp = predictions[i]
         segment_predict_multithr = []
-        thr_set = np.arange(0.3, 0.8, 0.1)  # multi-threshold: [0.3,0.4,0.5,0.6,0.7]
+        thr_set = np.arange(0.6, 0.7, 0.1)
         for thr in thr_set:
             if tmp.max() == tmp.min():
                 continue
@@ -220,5 +220,117 @@ def getDetectionMAP_agnostic(predictions, gtsegments, gtlabels):
     """
     iou_list = [0.1, 0.2, 0.3, 0.4, 0.5]
     dmap_list = [_loc_map_agnostic(predictions, iou, gtsegments, gtlabels)
+                 for iou in iou_list]
+    return dmap_list, iou_list
+
+
+# --------------- BSN-style proposal generation ---------------
+
+def _peak_pick(prob, rel_thresh):
+    """Local maxima on 1-D array, keep peaks > rel_thresh * max."""
+    if len(prob) < 2 or prob.max() <= 0:
+        return []
+    thr = rel_thresh * prob.max()
+    peaks = []
+    for t in range(len(prob)):
+        l = prob[t - 1] if t > 0 else -1e9
+        r = prob[t + 1] if t < len(prob) - 1 else -1e9
+        if prob[t] >= l and prob[t] >= r and prob[t] > thr:
+            peaks.append(t)
+    return peaks
+
+
+def _iou_matching_ap(segment_predict, gtsegments, th):
+    """Shared IoU matching + AP computation (used by both threshold and BSN)."""
+    if len(segment_predict) == 0:
+        return 0.0
+    segment_predict = np.array(segment_predict)
+    segment_predict = segment_predict[np.argsort(-segment_predict[:, 3])]
+
+    segment_gt = [[i, gtsegments[i][j][0], gtsegments[i][j][1]]
+                  for i in range(len(gtsegments))
+                  for j in range(len(gtsegments[i]))]
+    gtpos = len(segment_gt)
+    if gtpos == 0:
+        return 0.0
+
+    tp, fp = [], []
+    for i in range(len(segment_predict)):
+        flag = 0.0
+        best_iou = 0.0
+        best_j = -1
+        for j in range(len(segment_gt)):
+            if segment_predict[i][0] == segment_gt[j][0]:
+                gt = range(int(segment_gt[j][1]), int(segment_gt[j][2]))
+                p = range(int(segment_predict[i][1]), int(segment_predict[i][2]))
+                inter = len(set(gt).intersection(set(p)))
+                union = len(set(gt).union(set(p)))
+                if union == 0:
+                    continue
+                IoU = float(inter) / float(union)
+                if IoU >= th and IoU > best_iou:
+                    flag = 1.0
+                    best_iou = IoU
+                    best_j = j
+        if flag > 0 and best_j >= 0:
+            del segment_gt[best_j]
+        tp.append(flag)
+        fp.append(1.0 - flag)
+    tp_c = np.cumsum(tp)
+    fp_c = np.cumsum(fp)
+    if sum(tp) == 0:
+        return 0.0
+    prc = np.sum((tp_c / (fp_c + tp_c)) * np.array(tp)) / gtpos
+    return 100.0 * prc
+
+
+def _loc_map_agnostic_bsn(predictions, start_preds, end_preds, th,
+                           gtsegments, gtlabels,
+                           start_thr=0.5, end_thr=0.5, max_dur=2048):
+    """BSN proposal: peak-pick start/end, enumerate (s,e), score, NMS."""
+    segment_predict = []
+    for i, (act, sp, ep) in enumerate(zip(predictions, start_preds, end_preds)):
+        starts = _peak_pick(sp, start_thr)
+        ends = _peak_pick(ep, end_thr)
+        if not starts or not ends:
+            # Fallback: use actionness-only threshold proposal for this video
+            pp = np.sort(act)[::-1]
+            c_s = np.mean(pp[:max(1, int(len(pp) / 16))])
+            if act.max() == act.min():
+                continue
+            threshold = act.max() - (act.max() - act.min()) * 0.6
+            vid_pred = np.concatenate([np.zeros(1),
+                                       (act > threshold).astype('float32'),
+                                       np.zeros(1)])
+            vid_pred_diff = [vid_pred[t] - vid_pred[t-1] for t in range(1, len(vid_pred))]
+            s_list = [k for k, v in enumerate(vid_pred_diff) if v == 1]
+            e_list = [k for k, v in enumerate(vid_pred_diff) if v == -1]
+            for j in range(len(s_list)):
+                if e_list[j] - s_list[j] >= 2:
+                    score = float(np.max(act[s_list[j]:e_list[j]])) + 0.7 * c_s
+                    segment_predict.append([i, s_list[j], e_list[j], score])
+            continue
+        proposals = []
+        for s in starts:
+            for e in ends:
+                if e <= s or (e - s) > max_dur or (e - s) < 2:
+                    continue
+                score = float(sp[s] * ep[e] * act[s:e + 1].mean())
+                proposals.append([i, s, e, score])
+        if proposals:
+            arr = np.array(proposals)
+            arr = arr[np.argsort(-arr[:, -1])]
+            _, keep = nms(arr[:, 1:-1], 0.6)
+            segment_predict.extend(list(arr[keep]))
+
+    return _iou_matching_ap(segment_predict, gtsegments, th)
+
+
+def getDetectionMAP_agnostic_bsn(predictions, start_preds, end_preds,
+                                  gtsegments, gtlabels, **kw):
+    """BSN variant of getDetectionMAP_agnostic."""
+    iou_list = [0.1, 0.2, 0.3, 0.4, 0.5]
+    dmap_list = [_loc_map_agnostic_bsn(predictions, start_preds, end_preds,
+                                        iou, gtsegments, gtlabels, **kw)
                  for iou in iou_list]
     return dmap_list, iou_list

@@ -49,6 +49,20 @@ parser.add_argument('--lambda-contrast', default=0.0, type=float,
                     help='Weight for within-video contrast loss (Phase 3). 0 = off')
 parser.add_argument('--contrast-margin', default=0.3, type=float,
                     help='Margin for within-video contrast loss')
+parser.add_argument('--lambda-boundary', default=0.5, type=float,
+                    help='Weight for start/end boundary BCE (Phase 2+). 0 = off')
+parser.add_argument('--boundary-sigma', default=1.0, type=float,
+                    help='Gaussian sigma for boundary target smoothing (snippets)')
+parser.add_argument('--boundary-pos-weight', default=10.0, type=float,
+                    help='pos_weight for boundary BCE (positives are rare)')
+parser.add_argument('--inference', default='threshold',
+                    choices=['threshold', 'bsn'],
+                    help='Proposal generation: adaptive threshold or BSN start/end')
+parser.add_argument('--bsn-start-thresh', default=0.5, type=float,
+                    help='BSN: relative peak threshold for start probs')
+parser.add_argument('--bsn-end-thresh', default=0.5, type=float)
+parser.add_argument('--bsn-max-dur', default=2048, type=int,
+                    help='BSN: max proposal duration in frames (after upsample)')
 parser.add_argument('--upsample', default='repeat', choices=['repeat', 'linear'],
                     help='Eval upsample mode: step-function (repeat) or linear interp')
 parser.add_argument('--normalize', action='store_true',

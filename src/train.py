@@ -143,6 +143,45 @@ def get_lambda(epoch, phase1_epochs, phase2_epochs, lambda1, lambda2):
         return float(lambda1), float(lambda2)
 
 
+def build_boundary_targets(y_bin, mask, sigma=1.0):
+    """Derive start/end targets from y_bin transitions, Gaussian-smoothed.
+    0->1 = start, 1->0 = end.  Returns (start_tgt, end_tgt) each [B, T].
+    """
+    B, T = y_bin.shape
+    device = y_bin.device
+    y_pad = F.pad(y_bin, (1, 0), value=0.0)       # [B, T+1]
+    diff = y_pad[:, 1:] - y_pad[:, :-1]           # [B, T]
+    start_hard = (diff > 0.5).float()              # 0->1 transition
+    # end: 1->0 transition (diff < -0.5) shifted left by 1 so it lands
+    # on the LAST positive frame rather than the first negative frame.
+    end_diff = (diff < -0.5).float()
+    end_hard = torch.zeros_like(end_diff)
+    end_hard[:, :-1] = end_diff[:, 1:]
+    # Gaussian smooth
+    k = int(2 * np.ceil(3 * sigma) + 1)
+    coords = torch.arange(k, dtype=torch.float32, device=device) - k // 2
+    kernel = torch.exp(-coords.pow(2) / (2 * sigma ** 2))
+    kernel = kernel / kernel.max()
+    kernel = kernel.view(1, 1, k)
+    start_tgt = F.conv1d(start_hard.unsqueeze(1), kernel,
+                         padding=k // 2).squeeze(1).clamp(0, 1) * mask.float()
+    end_tgt = F.conv1d(end_hard.unsqueeze(1), kernel,
+                       padding=k // 2).squeeze(1).clamp(0, 1) * mask.float()
+    return start_tgt, end_tgt
+
+
+def boundary_bce_loss(start_logits, end_logits, y_bin, mask, sigma=1.0,
+                      pos_weight=10.0):
+    """BCE for start/end heads. Only computed on valid (masked) frames."""
+    start_tgt, end_tgt = build_boundary_targets(y_bin, mask, sigma=sigma)
+    pw = torch.tensor([pos_weight], device=y_bin.device)
+    s_loss = F.binary_cross_entropy_with_logits(
+        start_logits.squeeze(-1)[mask], start_tgt[mask], pos_weight=pw)
+    e_loss = F.binary_cross_entropy_with_logits(
+        end_logits.squeeze(-1)[mask], end_tgt[mask], pos_weight=pw)
+    return s_loss + e_loss
+
+
 def train(model, normal_loader, anomaly_loader, testloader, args, label_map, device):
     model.to(device)
     gt = np.load(args.gt_path)
@@ -179,7 +218,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         lam1, lam2 = get_lambda(e, args.phase1_epochs, args.phase2_epochs,
                                 args.lambda1, args.lambda2)
         model.train()
-        sum_bce_v = sum_nce = sum_cts = sum_fbce = sum_p3 = sum_ctr = 0.0
+        sum_bce_v = sum_nce = sum_cts = sum_fbce = sum_p3 = sum_ctr = sum_bnd = 0.0
         n_iters = min(len(normal_loader), len(anomaly_loader))
         t_start = time.time()
         pbar = tqdm(range(n_iters),
@@ -199,7 +238,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             lengths = torch.cat([n_len, a_len], dim=0).to(device)
             text_labels_t = get_batch_label(text_labels, prompt_text, label_map).to(device)
 
-            text_features, logits1, logits2 = model(visual, None, prompt_text, lengths)
+            text_features, logits1, logits2, start_logits, end_logits = model(visual, None, prompt_text, lengths)
 
             # Original MIL losses (preserved)
             loss_bce_v = CLAS2(logits1, text_labels_t, lengths, device)
@@ -246,9 +285,23 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             else:
                 loss_ctr = torch.zeros(1, device=device)
 
+            # Boundary start/end loss (Phase 2+, same gate as frame BCE)
+            if lam1 > 0 and args.lambda_boundary > 0:
+                if 'mask_T' not in locals():
+                    logits1_2d_ = logits1.squeeze(-1)
+                    mask_T = (torch.arange(logits1_2d_.shape[1], device=device)
+                              .unsqueeze(0) < lengths.unsqueeze(1))
+                loss_bnd = boundary_bce_loss(
+                    start_logits, end_logits, y_bin, mask_T,
+                    sigma=args.boundary_sigma,
+                    pos_weight=args.boundary_pos_weight)
+            else:
+                loss_bnd = torch.zeros(1, device=device)
+
             loss = (loss_bce_v + loss_nce + loss_cts
                     + lam1 * loss_fbce + lam2 * loss_p3
-                    + args.lambda_contrast * loss_ctr)
+                    + args.lambda_contrast * loss_ctr
+                    + lam1 * args.lambda_boundary * loss_bnd)
 
             optimizer.zero_grad()
             loss.backward()
@@ -260,6 +313,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             sum_fbce  += float(loss_fbce)
             sum_p3    += float(loss_p3)
             sum_ctr   += float(loss_ctr)
+            sum_bnd   += float(loss_bnd)
             pbar.set_postfix(bce_v=sum_bce_v / (i + 1),
                              nce=sum_nce / (i + 1),
                              cts=sum_cts / (i + 1),
@@ -274,18 +328,23 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         avg_fbce = sum_fbce / n_iters
         avg_p3 = sum_p3 / n_iters
         avg_ctr = sum_ctr / n_iters
+        avg_bnd = sum_bnd / n_iters
 
         # End-of-epoch eval — model selection by class-agnostic avg_mAP
         AUC, avg_mAP, dmap_ag = test(
             model, testloader, args.visual_length, prompt_text,
-            gt, gtsegments, gtlabels, device, quiet=True)
+            gt, gtsegments, gtlabels, device, quiet=True,
+            inference=args.inference,
+            bsn_start_thresh=args.bsn_start_thresh,
+            bsn_end_thresh=args.bsn_end_thresh,
+            bsn_max_dur=args.bsn_max_dur)
         ag_str = '/'.join(f'{v:.2f}' for v in dmap_ag[:5])
         is_best = avg_mAP > ap_best
         tag = ' *' if is_best else ''
         print(f'[ep {e+1:2d}/{args.max_epoch} {train_secs:.0f}s] '
               f'lam=({lam1},{lam2}) | '
               f'bce_v={avg_bce_v:.3f} nce={avg_nce:.3f} cts={avg_cts:.4f} '
-              f'fbce={avg_fbce:.3f} p3={avg_p3:.3f} ctr={avg_ctr:.3f} | '
+              f'fbce={avg_fbce:.3f} p3={avg_p3:.3f} ctr={avg_ctr:.3f} bnd={avg_bnd:.3f} | '
               f'AUC={AUC:.4f} mAP={avg_mAP:.2f} [{ag_str}]{tag}',
               flush=True)
         if is_best:

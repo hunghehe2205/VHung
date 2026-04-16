@@ -45,7 +45,8 @@ def _upsample_linear_2d(x, factor):
 
 
 def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, device,
-         quiet=False, upsample='repeat'):
+         quiet=False, upsample='repeat', inference='threshold',
+         bsn_start_thresh=0.5, bsn_end_thresh=0.5, bsn_max_dur=2048):
     model.to(device)
     model.eval()
 
@@ -61,6 +62,8 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, d
     with torch.no_grad():
         ap1_per_video = []
         ap2_per_video = []
+        start_per_video = []
+        end_per_video = []
         iterator = testdataloader if quiet else tqdm(
             testdataloader, desc='Testing', disable=not sys.stderr.isatty())
         for i, item in enumerate(iterator):
@@ -87,13 +90,20 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, d
             lengths = lengths.to(int)
             padding_mask = get_batch_mask(lengths, maxlen).to(device)
 
-            _, logits1, logits2 = model(visual, padding_mask, prompt_text, lengths)
+            _, logits1, logits2, s_logits, e_logits = model(
+                visual, padding_mask, prompt_text, lengths)
             logits1 = logits1.reshape(logits1.shape[0] * logits1.shape[1], logits1.shape[2])
             logits2 = logits2.reshape(logits2.shape[0] * logits2.shape[1], logits2.shape[2])
+            s_logits = s_logits.reshape(s_logits.shape[0] * s_logits.shape[1], s_logits.shape[2])
+            e_logits = e_logits.reshape(e_logits.shape[0] * e_logits.shape[1], e_logits.shape[2])
             prob2 = (1 - logits2[0:len_cur].softmax(dim=-1)[:, 0].squeeze(-1))
             prob1 = torch.sigmoid(logits1[0:len_cur].squeeze(-1))
             ap1_per_video.append(prob1.cpu().numpy())
             ap2_per_video.append(prob2.cpu().numpy())
+            start_per_video.append(
+                torch.sigmoid(s_logits[0:len_cur].squeeze(-1)).cpu().numpy())
+            end_per_video.append(
+                torch.sigmoid(e_logits[0:len_cur].squeeze(-1)).cpu().numpy())
 
             element_logits2 = logits2[0:len_cur].softmax(dim=-1).detach().cpu().numpy()
             element_logits2 = up2d(element_logits2)
@@ -107,16 +117,24 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, d
     ROC2 = roc_auc_score(gt, ap2_frame)
     AP2 = average_precision_score(gt, ap2_frame)
 
-    from utils.detection_map import getDetectionMAP_agnostic
+    from utils.detection_map import getDetectionMAP_agnostic, getDetectionMAP_agnostic_bsn
 
     # Per-class (legacy)
     dmap_pc, iou = dmAP(element_logits2_stack, gtsegments, gtlabels,
                        excludeNormal=False)
     averageMAP_pc = float(np.mean(dmap_pc[:5]))
 
-    # Class-agnostic: upsample each per-video prob1 array ×16 to frame granularity
+    # Class-agnostic
     agnostic_stack = [up1d(fs) for fs in ap1_per_video]
-    dmap_ag, _ = getDetectionMAP_agnostic(agnostic_stack, gtsegments, gtlabels)
+    if inference == 'bsn':
+        start_stack = [up1d(fs) for fs in start_per_video]
+        end_stack = [up1d(fs) for fs in end_per_video]
+        dmap_ag, _ = getDetectionMAP_agnostic_bsn(
+            agnostic_stack, start_stack, end_stack, gtsegments, gtlabels,
+            start_thr=bsn_start_thresh, end_thr=bsn_end_thresh,
+            max_dur=bsn_max_dur)
+    else:
+        dmap_ag, _ = getDetectionMAP_agnostic(agnostic_stack, gtsegments, gtlabels)
     averageMAP_ag = float(np.mean(dmap_ag))
 
     if not quiet:
@@ -147,4 +165,6 @@ if __name__ == '__main__':
     model.load_state_dict(torch.load(args.model_path, weights_only=False, map_location=device))
 
     test(model, testdataloader, args.visual_length, prompt_text, gt, gtsegments, gtlabels, device,
-         upsample=args.upsample)
+         upsample=args.upsample, inference=args.inference,
+         bsn_start_thresh=args.bsn_start_thresh, bsn_end_thresh=args.bsn_end_thresh,
+         bsn_max_dur=args.bsn_max_dur)

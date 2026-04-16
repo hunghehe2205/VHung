@@ -98,6 +98,8 @@ class CLIPVAD(nn.Module):
             ("c_proj", nn.Linear(visual_width * 4, visual_width))
         ]))
         self.classifier = nn.Linear(visual_width, 1)
+        self.start_head = nn.Linear(visual_width, 1)
+        self.end_head = nn.Linear(visual_width, 1)
 
         self.clipmodel, _ = clip.load("ViT-B/16", device)
         for clip_param in self.clipmodel.parameters():
@@ -150,19 +152,19 @@ class CLIPVAD(nn.Module):
         images = images.permute(1, 0, 2) + frame_position_embeddings
 
         x, _ = self.temporal((images, None))
-        x = x.permute(1, 0, 2)
+        x_pre = x.permute(1, 0, 2)  # [B, T, D] pre-GCN (sharp for boundary)
 
-        adj = self.adj4(x, lengths)
-        disadj = self.disAdj(x.shape[0], x.shape[1])
-        x1_h = self.gelu(self.gc1(x, adj))
-        x2_h = self.gelu(self.gc3(x, disadj))
+        adj = self.adj4(x_pre, lengths)
+        disadj = self.disAdj(x_pre.shape[0], x_pre.shape[1])
+        x1_h = self.gelu(self.gc1(x_pre, adj))
+        x2_h = self.gelu(self.gc3(x_pre, disadj))
 
         x1 = self.gelu(self.gc2(x1_h, adj))
         x2 = self.gelu(self.gc4(x2_h, disadj))
 
         x = torch.cat((x1, x2), 2)
         x = self.linear(x)
-        return x
+        return x, x_pre
 
     def encode_textprompt(self, text):
         word_tokens = clip.tokenize(text).to(self.device)
@@ -181,8 +183,10 @@ class CLIPVAD(nn.Module):
         return text_features
 
     def forward(self, visual, padding_mask, text, lengths):
-        visual_features = self.encode_video(visual, padding_mask, lengths)
+        visual_features, x_pre = self.encode_video(visual, padding_mask, lengths)
         logits1 = self.classifier(visual_features + self.mlp2(visual_features))
+        start_logits = self.start_head(x_pre)
+        end_logits = self.end_head(x_pre)
 
         text_features_ori = self.encode_textprompt(text)
 
@@ -201,4 +205,4 @@ class CLIPVAD(nn.Module):
         text_features_norm = text_features_norm.permute(0, 2, 1)
         logits2 = visual_features_norm @ text_features_norm.type(visual_features_norm.dtype) / 0.07
 
-        return text_features_ori, logits1, logits2
+        return text_features_ori, logits1, logits2, start_logits, end_logits

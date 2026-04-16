@@ -159,7 +159,7 @@ def main():
             lengths = lengths.to(int)
             padding_mask = get_batch_mask(lengths, maxlen).to(device)
 
-            _, logits1, _ = model(visual, padding_mask, prompt_text, lengths)
+            _, logits1, _, _, _ = model(visual, padding_mask, prompt_text, lengths)
             logits1 = logits1.reshape(logits1.shape[0] * logits1.shape[1],
                                       logits1.shape[2])
             prob1 = torch.sigmoid(logits1[0:len_cur].squeeze(-1)).cpu().numpy()

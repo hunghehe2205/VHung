@@ -301,19 +301,27 @@ def _iou_matching_ap(segment_predict, gtsegments, gtlabels, th):
     return 100.0 * prc
 
 
-def _loc_map_agnostic_bsn(predictions, start_preds, end_preds, th,
-                           gtsegments, gtlabels,
-                           start_thr=0.5, end_thr=0.5, max_dur=2048):
-    """BSN proposal: peak-pick start/end, enumerate (s,e), score, NMS."""
+def _bsn_generate_proposals(predictions, start_preds, end_preds,
+                             start_thr=0.5, end_thr=0.5, max_dur=2048):
+    """Peak-pick start/end, enumerate (s,e), score, NMS.  Run once and reuse
+    across IoU thresholds.  Returns (segment_predict, stats_dict)."""
+    n_videos = len(predictions)
     segment_predict = []
+    n_with_proposals = 0
+    n_skipped = 0
+    total_starts = 0
+    total_ends = 0
+    total_raw_proposals = 0
+    total_nms_proposals = 0
+
     for i, (act, sp, ep) in enumerate(zip(predictions, start_preds, end_preds)):
         starts = _peak_pick(sp, start_thr)
         ends = _peak_pick(ep, end_thr)
         if not starts or not ends:
-            # No boundary peaks detected — skip this video.
-            # Mixing threshold-fallback scores (max + 0.7*c_s ~ 1.0+) with
-            # BSN scores (sp*ep*mean ~ 0.01-0.1) corrupts the global ranking.
+            n_skipped += 1
             continue
+        total_starts += len(starts)
+        total_ends += len(ends)
         pp = np.sort(act)[::-1]
         c_s = float(np.mean(pp[:max(1, int(len(pp) / 16))]))
         proposals = []
@@ -323,20 +331,35 @@ def _loc_map_agnostic_bsn(predictions, start_preds, end_preds, th,
                     continue
                 score = float(sp[s] * ep[e] * act[s:e + 1].mean()) + 0.7 * c_s
                 proposals.append([i, s, e + 1, score])  # exclusive end to match range() IoU
+        total_raw_proposals += len(proposals)
         if proposals:
+            n_with_proposals += 1
             arr = np.array(proposals)
             arr = arr[np.argsort(-arr[:, -1])]
             _, keep = nms(arr[:, 1:-1], 0.6)
-            segment_predict.extend(list(arr[keep]))
+            kept = list(arr[keep])
+            total_nms_proposals += len(kept)
+            segment_predict.extend(kept)
 
-    return _iou_matching_ap(segment_predict, gtsegments, gtlabels, th)
+    stats = {
+        'n_videos': n_videos,
+        'n_with_proposals': n_with_proposals,
+        'n_skipped': n_skipped,
+        'total_starts': total_starts,
+        'total_ends': total_ends,
+        'total_raw_proposals': total_raw_proposals,
+        'total_nms_proposals': total_nms_proposals,
+    }
+    return segment_predict, stats
 
 
 def getDetectionMAP_agnostic_bsn(predictions, start_preds, end_preds,
                                   gtsegments, gtlabels, **kw):
-    """BSN variant of getDetectionMAP_agnostic."""
+    """BSN variant of getDetectionMAP_agnostic.
+    Returns (dmap_list, iou_list, bsn_stats)."""
+    segment_predict, stats = _bsn_generate_proposals(
+        predictions, start_preds, end_preds, **kw)
     iou_list = [0.1, 0.2, 0.3, 0.4, 0.5]
-    dmap_list = [_loc_map_agnostic_bsn(predictions, start_preds, end_preds,
-                                        iou, gtsegments, gtlabels, **kw)
+    dmap_list = [_iou_matching_ap(segment_predict, gtsegments, gtlabels, iou)
                  for iou in iou_list]
-    return dmap_list, iou_list
+    return dmap_list, iou_list, stats

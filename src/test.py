@@ -126,10 +126,11 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, d
 
     # Class-agnostic
     agnostic_stack = [up1d(fs) for fs in ap1_per_video]
+    bsn_stats = None
     if inference == 'bsn':
         start_stack = [up1d(fs) for fs in start_per_video]
         end_stack = [up1d(fs) for fs in end_per_video]
-        dmap_ag, _ = getDetectionMAP_agnostic_bsn(
+        dmap_ag, _, bsn_stats = getDetectionMAP_agnostic_bsn(
             agnostic_stack, start_stack, end_stack, gtsegments, gtlabels,
             start_thr=bsn_start_thresh, end_thr=bsn_end_thresh,
             max_dur=bsn_max_dur)
@@ -143,8 +144,17 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, d
         ag_str = '/'.join(f'{v:.2f}' for v in dmap_ag[:5])
         print(f"[per-class] AVG={averageMAP_pc:.2f} [{pc_str}]")
         print(f"[agnostic ] AVG={averageMAP_ag:.2f} [{ag_str}]")
+        if bsn_stats:
+            st = bsn_stats
+            n_active = st['n_videos'] - st['n_skipped']
+            avg_prop = st['total_nms_proposals'] / max(1, st['n_with_proposals'])
+            print(f"[BSN] {st['n_with_proposals']}/{st['n_videos']} videos with proposals, "
+                  f"{st['n_skipped']} skipped | "
+                  f"peaks: {st['total_starts']}s/{st['total_ends']}e | "
+                  f"proposals: {st['total_raw_proposals']} raw -> {st['total_nms_proposals']} nms "
+                  f"({avg_prop:.1f}/video)")
 
-    return ROC1, averageMAP_ag, dmap_ag
+    return ROC1, averageMAP_ag, dmap_ag, bsn_stats
 
 
 if __name__ == '__main__':

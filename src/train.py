@@ -331,7 +331,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         avg_bnd = sum_bnd / n_iters
 
         # End-of-epoch eval — model selection by class-agnostic avg_mAP
-        AUC, avg_mAP, dmap_ag = test(
+        AUC, avg_mAP, dmap_ag, bsn_stats = test(
             model, testloader, args.visual_length, prompt_text,
             gt, gtsegments, gtlabels, device, quiet=True,
             inference=args.inference,
@@ -341,11 +341,17 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         ag_str = '/'.join(f'{v:.2f}' for v in dmap_ag[:5])
         is_best = avg_mAP > ap_best
         tag = ' *' if is_best else ''
+        bsn_str = ''
+        if bsn_stats:
+            st = bsn_stats
+            avg_prop = st['total_nms_proposals'] / max(1, st['n_with_proposals'])
+            bsn_str = (f' | BSN {st["n_with_proposals"]}/{st["n_videos"]}v '
+                       f'{st["total_nms_proposals"]}p({avg_prop:.1f}/v)')
         print(f'[ep {e+1:2d}/{args.max_epoch} {train_secs:.0f}s] '
               f'lam=({lam1},{lam2}) | '
               f'bce_v={avg_bce_v:.3f} nce={avg_nce:.3f} cts={avg_cts:.4f} '
               f'fbce={avg_fbce:.3f} p3={avg_p3:.3f} ctr={avg_ctr:.3f} bnd={avg_bnd:.3f} | '
-              f'AUC={AUC:.4f} mAP={avg_mAP:.2f} [{ag_str}]{tag}',
+              f'AUC={AUC:.4f} mAP={avg_mAP:.2f} [{ag_str}]{bsn_str}{tag}',
               flush=True)
         if is_best:
             ap_best = avg_mAP

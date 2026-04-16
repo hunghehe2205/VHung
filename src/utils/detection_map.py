@@ -302,9 +302,12 @@ def _iou_matching_ap(segment_predict, gtsegments, gtlabels, th):
 
 
 def _bsn_generate_proposals(predictions, start_preds, end_preds,
-                             start_thr=0.5, end_thr=0.5, max_dur=2048):
-    """Peak-pick start/end, enumerate (s,e), score, NMS.  Run once and reuse
-    across IoU thresholds.  Returns (segment_predict, stats_dict)."""
+                             start_thr=0.5, end_thr=0.5, max_dur=2048,
+                             start_offs=None, end_offs=None, clip_len=16):
+    """Peak-pick at snippet resolution, refine with offsets to frame resolution.
+    predictions, start_preds, end_preds: lists of snippet-resolution 1-D arrays.
+    start_offs, end_offs: lists of snippet-resolution offset arrays (optional).
+    Returns (segment_predict, stats_dict)."""
     n_videos = len(predictions)
     segment_predict = []
     n_with_proposals = 0
@@ -327,8 +330,17 @@ def _bsn_generate_proposals(predictions, start_preds, end_preds,
             for e in ends:
                 if e <= s or (e - s) > max_dur or (e - s) < 2:
                     continue
+                # Offset refinement: snippet index → frame position
+                if start_offs is not None and end_offs is not None:
+                    fs = int(s * clip_len + start_offs[i][s] * clip_len)
+                    fe = int(e * clip_len + end_offs[i][e] * clip_len)
+                else:
+                    fs = s * clip_len
+                    fe = (e + 1) * clip_len
+                if fe <= fs:
+                    fe = fs + clip_len
                 score = float(sp[s] * ep[e] * act[s:e + 1].mean())
-                proposals.append([i, s, e + 1, score])  # exclusive end to match range() IoU
+                proposals.append([i, fs, fe, score])
         total_raw_proposals += len(proposals)
         if proposals:
             n_with_proposals += 1

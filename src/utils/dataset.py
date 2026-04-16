@@ -72,7 +72,12 @@ class UCFDataset(data.Dataset):
                 target_len=self.clip_dim,
             )
             y_bin = torch.from_numpy(y_bin)  # [clip_dim] float32
-            return clip_feature, clip_label, y_bin, clip_length
+            s_cls, e_cls, s_off, e_off = tools.build_boundary_offset_targets(
+                events_sec=events_sec, fps=fps,
+                n_features=n_features_raw, clip_len=16, target_len=self.clip_dim)
+            bnd_targets = torch.from_numpy(
+                np.stack([s_cls, e_cls, s_off, e_off]))  # [4, clip_dim]
+            return clip_feature, clip_label, y_bin, clip_length, bnd_targets
 
         # test mode — keep legacy 3-tuple for compatibility with test.py
         return clip_feature, clip_label, clip_length

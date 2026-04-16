@@ -116,3 +116,47 @@ def build_frame_labels(events_sec, fps, n_features, clip_len=16, target_len=256)
         y = np.zeros(target_len, dtype=np.float32)
         y[:n_features] = y_raw
         return y
+
+
+def build_boundary_offset_targets(events_sec, fps, n_features, clip_len=16, target_len=256):
+    """Compute per-snippet start/end cls + offset targets from event timestamps.
+    Returns: (start_cls, end_cls, start_off, end_off) each [target_len] float32.
+    cls: 1.0 at boundary snippet, 0.0 elsewhere.
+    off: sub-snippet offset in [0, 1) at boundary snippet, 0 elsewhere.
+    """
+    start_cls = np.zeros(target_len, dtype=np.float32)
+    end_cls = np.zeros(target_len, dtype=np.float32)
+    start_off = np.zeros(target_len, dtype=np.float32)
+    end_off = np.zeros(target_len, dtype=np.float32)
+
+    if not events_sec:
+        return start_cls, end_cls, start_off, end_off
+
+    # Snippet-to-raw mapping (same layout as uniform_extract / build_frame_labels)
+    r = np.linspace(0, n_features, target_len + 1, dtype=np.int32)
+
+    for s_sec, e_sec in events_sec:
+        s_frame = float(s_sec) * fps
+        e_frame = float(e_sec) * fps
+        s_raw = s_frame / clip_len  # fractional raw snippet index
+        e_raw = e_frame / clip_len
+
+        # Find target snippet containing start
+        for t in range(target_len):
+            if r[t] <= s_raw < r[t + 1] or (t == target_len - 1 and s_raw >= r[t]):
+                start_cls[t] = 1.0
+                snippet_start_frame = r[t] * clip_len
+                snippet_span = max((r[t + 1] - r[t]) * clip_len, clip_len)
+                start_off[t] = np.clip((s_frame - snippet_start_frame) / snippet_span, 0.0, 0.999)
+                break
+
+        # Find target snippet containing end
+        for t in range(target_len):
+            if r[t] <= e_raw < r[t + 1] or (t == target_len - 1 and e_raw >= r[t]):
+                end_cls[t] = 1.0
+                snippet_start_frame = r[t] * clip_len
+                snippet_span = max((r[t + 1] - r[t]) * clip_len, clip_len)
+                end_off[t] = np.clip((e_frame - snippet_start_frame) / snippet_span, 0.0, 0.999)
+                break
+
+    return start_cls, end_cls, start_off, end_off

@@ -143,43 +143,30 @@ def get_lambda(epoch, phase1_epochs, phase2_epochs, lambda1, lambda2):
         return float(lambda1), float(lambda2)
 
 
-def build_boundary_targets(y_bin, mask, sigma=1.0):
-    """Derive start/end targets from y_bin transitions, Gaussian-smoothed.
-    0->1 = start, 1->0 = end.  Returns (start_tgt, end_tgt) each [B, T].
+def boundary_offset_loss(start_logits, end_logits,
+                         start_cls_tgt, end_cls_tgt,
+                         start_off_tgt, end_off_tgt,
+                         mask, pos_weight=10.0):
+    """BCE for start/end classification + smooth L1 for offset at positive snippets.
+    start_logits/end_logits: [B, T, 2] — channel 0 = cls logit, channel 1 = offset logit.
     """
-    B, T = y_bin.shape
-    device = y_bin.device
-    y_pad = F.pad(y_bin, (1, 0), value=0.0)       # [B, T+1]
-    diff = y_pad[:, 1:] - y_pad[:, :-1]           # [B, T]
-    start_hard = (diff > 0.5).float()              # 0->1 transition
-    # end: 1->0 transition (diff < -0.5) shifted left by 1 so it lands
-    # on the LAST positive frame rather than the first negative frame.
-    end_diff = (diff < -0.5).float()
-    end_hard = torch.zeros_like(end_diff)
-    end_hard[:, :-1] = end_diff[:, 1:]
-    # Gaussian smooth
-    k = int(2 * np.ceil(3 * sigma) + 1)
-    coords = torch.arange(k, dtype=torch.float32, device=device) - k // 2
-    kernel = torch.exp(-coords.pow(2) / (2 * sigma ** 2))
-    kernel = kernel / kernel.max()
-    kernel = kernel.view(1, 1, k)
-    start_tgt = F.conv1d(start_hard.unsqueeze(1), kernel,
-                         padding=k // 2).squeeze(1).clamp(0, 1) * mask.float()
-    end_tgt = F.conv1d(end_hard.unsqueeze(1), kernel,
-                       padding=k // 2).squeeze(1).clamp(0, 1) * mask.float()
-    return start_tgt, end_tgt
+    pw = torch.tensor([pos_weight], device=mask.device)
+    s_cls = start_logits[..., 0]   # [B, T]
+    e_cls = end_logits[..., 0]
+    loss_cls = (
+        F.binary_cross_entropy_with_logits(s_cls[mask], start_cls_tgt[mask], pos_weight=pw) +
+        F.binary_cross_entropy_with_logits(e_cls[mask], end_cls_tgt[mask], pos_weight=pw))
 
-
-def boundary_bce_loss(start_logits, end_logits, y_bin, mask, sigma=1.0,
-                      pos_weight=10.0):
-    """BCE for start/end heads. Only computed on valid (masked) frames."""
-    start_tgt, end_tgt = build_boundary_targets(y_bin, mask, sigma=sigma)
-    pw = torch.tensor([pos_weight], device=y_bin.device)
-    s_loss = F.binary_cross_entropy_with_logits(
-        start_logits.squeeze(-1)[mask], start_tgt[mask], pos_weight=pw)
-    e_loss = F.binary_cross_entropy_with_logits(
-        end_logits.squeeze(-1)[mask], end_tgt[mask], pos_weight=pw)
-    return s_loss + e_loss
+    s_off = torch.sigmoid(start_logits[..., 1])
+    e_off = torch.sigmoid(end_logits[..., 1])
+    s_pos = (start_cls_tgt > 0.5) & mask
+    e_pos = (end_cls_tgt > 0.5) & mask
+    loss_off = torch.zeros(1, device=mask.device)
+    if s_pos.any():
+        loss_off = loss_off + F.smooth_l1_loss(s_off[s_pos], start_off_tgt[s_pos])
+    if e_pos.any():
+        loss_off = loss_off + F.smooth_l1_loss(e_off[e_pos], end_off_tgt[e_pos])
+    return loss_cls + loss_off
 
 
 def train(model, normal_loader, anomaly_loader, testloader, args, label_map, device):
@@ -229,11 +216,16 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         anomaly_iter = iter(anomaly_loader)
 
         for i in pbar:
-            n_feat, n_lab, n_ybin, n_len = next(normal_iter)
-            a_feat, a_lab, a_ybin, a_len = next(anomaly_iter)
+            n_feat, n_lab, n_ybin, n_len, n_bnd = next(normal_iter)
+            a_feat, a_lab, a_ybin, a_len, a_bnd = next(anomaly_iter)
 
             visual = torch.cat([n_feat, a_feat], dim=0).to(device)
             y_bin = torch.cat([n_ybin, a_ybin], dim=0).to(device)        # [2B, T]
+            bnd_targets = torch.cat([n_bnd, a_bnd], dim=0).to(device)    # [2B, 4, T]
+            s_cls_tgt = bnd_targets[:, 0]  # [2B, T]
+            e_cls_tgt = bnd_targets[:, 1]
+            s_off_tgt = bnd_targets[:, 2]
+            e_off_tgt = bnd_targets[:, 3]
             text_labels = list(n_lab) + list(a_lab)
             lengths = torch.cat([n_len, a_len], dim=0).to(device)
             text_labels_t = get_batch_label(text_labels, prompt_text, label_map).to(device)
@@ -291,10 +283,10 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                     logits1_2d_ = logits1.squeeze(-1)
                     mask_T = (torch.arange(logits1_2d_.shape[1], device=device)
                               .unsqueeze(0) < lengths.unsqueeze(1))
-                loss_bnd = boundary_bce_loss(
-                    start_logits, end_logits, y_bin, mask_T,
-                    sigma=args.boundary_sigma,
-                    pos_weight=args.boundary_pos_weight)
+                loss_bnd = boundary_offset_loss(
+                    start_logits, end_logits,
+                    s_cls_tgt, e_cls_tgt, s_off_tgt, e_off_tgt,
+                    mask_T, pos_weight=args.boundary_pos_weight)
             else:
                 loss_bnd = torch.zeros(1, device=device)
 
@@ -330,31 +322,32 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         avg_ctr = sum_ctr / n_iters
         avg_bnd = sum_bnd / n_iters
 
-        # End-of-epoch eval — model selection by class-agnostic avg_mAP
-        AUC, avg_mAP, dmap_ag, bsn_stats = test(
+        # End-of-epoch eval — dual eval: threshold for model selection, BSN diagnostic
+        AUC, avg_mAP_thr, dmap_thr, dmap_bsn, bsn_stats = test(
             model, testloader, args.visual_length, prompt_text,
             gt, gtsegments, gtlabels, device, quiet=True,
             inference=args.inference,
             bsn_start_thresh=args.bsn_start_thresh,
             bsn_end_thresh=args.bsn_end_thresh,
             bsn_max_dur=args.bsn_max_dur)
-        ag_str = '/'.join(f'{v:.2f}' for v in dmap_ag[:5])
-        is_best = avg_mAP > ap_best
+        thr_str = '/'.join(f'{v:.2f}' for v in dmap_thr[:5])
+        is_best = avg_mAP_thr > ap_best
         tag = ' *' if is_best else ''
         bsn_str = ''
-        if bsn_stats:
+        if bsn_stats and dmap_bsn is not None:
             st = bsn_stats
             avg_prop = st['total_nms_proposals'] / max(1, st['n_with_proposals'])
-            bsn_str = (f' | BSN {st["n_with_proposals"]}/{st["n_videos"]}v '
+            avg_bsn = float(np.mean(dmap_bsn))
+            bsn_str = (f' | BSN={avg_bsn:.2f} {st["n_with_proposals"]}/{st["n_videos"]}v '
                        f'{st["total_nms_proposals"]}p({avg_prop:.1f}/v)')
         print(f'[ep {e+1:2d}/{args.max_epoch} {train_secs:.0f}s] '
               f'lam=({lam1},{lam2}) | '
               f'bce_v={avg_bce_v:.3f} nce={avg_nce:.3f} cts={avg_cts:.4f} '
               f'fbce={avg_fbce:.3f} p3={avg_p3:.3f} ctr={avg_ctr:.3f} bnd={avg_bnd:.3f} | '
-              f'AUC={AUC:.4f} mAP={avg_mAP:.2f} [{ag_str}]{bsn_str}{tag}',
+              f'AUC={AUC:.4f} mAP={avg_mAP_thr:.2f} [{thr_str}]{bsn_str}{tag}',
               flush=True)
         if is_best:
-            ap_best = avg_mAP
+            ap_best = avg_mAP_thr
             torch.save({'epoch': e,
                         'model_state_dict': model.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),

@@ -62,8 +62,10 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, d
     with torch.no_grad():
         ap1_per_video = []
         ap2_per_video = []
-        start_per_video = []
-        end_per_video = []
+        start_cls_per_video = []
+        start_off_per_video = []
+        end_cls_per_video = []
+        end_off_per_video = []
         iterator = testdataloader if quiet else tqdm(
             testdataloader, desc='Testing', disable=not sys.stderr.isatty())
         for i, item in enumerate(iterator):
@@ -94,16 +96,22 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, d
                 visual, padding_mask, prompt_text, lengths)
             logits1 = logits1.reshape(logits1.shape[0] * logits1.shape[1], logits1.shape[2])
             logits2 = logits2.reshape(logits2.shape[0] * logits2.shape[1], logits2.shape[2])
+            # s_logits, e_logits: [chunks, T, 2] → [chunks*T, 2]
             s_logits = s_logits.reshape(s_logits.shape[0] * s_logits.shape[1], s_logits.shape[2])
             e_logits = e_logits.reshape(e_logits.shape[0] * e_logits.shape[1], e_logits.shape[2])
             prob2 = (1 - logits2[0:len_cur].softmax(dim=-1)[:, 0].squeeze(-1))
             prob1 = torch.sigmoid(logits1[0:len_cur].squeeze(-1))
             ap1_per_video.append(prob1.cpu().numpy())
             ap2_per_video.append(prob2.cpu().numpy())
-            start_per_video.append(
-                torch.sigmoid(s_logits[0:len_cur].squeeze(-1)).cpu().numpy())
-            end_per_video.append(
-                torch.sigmoid(e_logits[0:len_cur].squeeze(-1)).cpu().numpy())
+            # D=2: channel 0 = cls, channel 1 = offset
+            start_cls_per_video.append(
+                torch.sigmoid(s_logits[0:len_cur, 0]).cpu().numpy())
+            start_off_per_video.append(
+                torch.sigmoid(s_logits[0:len_cur, 1]).cpu().numpy())
+            end_cls_per_video.append(
+                torch.sigmoid(e_logits[0:len_cur, 0]).cpu().numpy())
+            end_off_per_video.append(
+                torch.sigmoid(e_logits[0:len_cur, 1]).cpu().numpy())
 
             element_logits2 = logits2[0:len_cur].softmax(dim=-1).detach().cpu().numpy()
             element_logits2 = up2d(element_logits2)
@@ -124,29 +132,34 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, d
                        excludeNormal=False)
     averageMAP_pc = float(np.mean(dmap_pc[:5]))
 
-    # Class-agnostic
+    # Dual eval: threshold mAP always (model selection), BSN diagnostic
     agnostic_stack = [up1d(fs) for fs in ap1_per_video]
+    dmap_thr, _ = getDetectionMAP_agnostic(agnostic_stack, gtsegments, gtlabels)
+    avg_thr = float(np.mean(dmap_thr))
+
     bsn_stats = None
+    dmap_bsn = None
     if inference == 'bsn':
-        start_stack = [up1d(fs) for fs in start_per_video]
-        end_stack = [up1d(fs) for fs in end_per_video]
-        dmap_ag, _, bsn_stats = getDetectionMAP_agnostic_bsn(
-            agnostic_stack, start_stack, end_stack, gtsegments, gtlabels,
+        # Snippet-resolution peak picking + offset refinement
+        dmap_bsn, _, bsn_stats = getDetectionMAP_agnostic_bsn(
+            ap1_per_video, start_cls_per_video, end_cls_per_video,
+            gtsegments, gtlabels,
+            start_offs=start_off_per_video, end_offs=end_off_per_video,
             start_thr=bsn_start_thresh, end_thr=bsn_end_thresh,
             max_dur=bsn_max_dur)
-    else:
-        dmap_ag, _ = getDetectionMAP_agnostic(agnostic_stack, gtsegments, gtlabels)
-    averageMAP_ag = float(np.mean(dmap_ag))
 
     if not quiet:
         print(f"AUC1={ROC1:.4f} AP1={AP1:.4f} | AUC2={ROC2:.4f} AP2={AP2:.4f}")
         pc_str = '/'.join(f'{v:.2f}' for v in dmap_pc[:5])
-        ag_str = '/'.join(f'{v:.2f}' for v in dmap_ag[:5])
+        thr_str = '/'.join(f'{v:.2f}' for v in dmap_thr[:5])
         print(f"[per-class] AVG={averageMAP_pc:.2f} [{pc_str}]")
-        print(f"[agnostic ] AVG={averageMAP_ag:.2f} [{ag_str}]")
+        print(f"[threshold] AVG={avg_thr:.2f} [{thr_str}]")
+        if dmap_bsn is not None:
+            bsn_str = '/'.join(f'{v:.2f}' for v in dmap_bsn[:5])
+            avg_bsn = float(np.mean(dmap_bsn))
+            print(f"[BSN     ] AVG={avg_bsn:.2f} [{bsn_str}]")
         if bsn_stats:
             st = bsn_stats
-            n_active = st['n_videos'] - st['n_skipped']
             avg_prop = st['total_nms_proposals'] / max(1, st['n_with_proposals'])
             print(f"[BSN] {st['n_with_proposals']}/{st['n_videos']} videos with proposals, "
                   f"{st['n_skipped']} skipped | "
@@ -154,7 +167,7 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels, d
                   f"proposals: {st['total_raw_proposals']} raw -> {st['total_nms_proposals']} nms "
                   f"({avg_prop:.1f}/video)")
 
-    return ROC1, averageMAP_ag, dmap_ag, bsn_stats
+    return ROC1, avg_thr, dmap_thr, dmap_bsn, bsn_stats
 
 
 if __name__ == '__main__':

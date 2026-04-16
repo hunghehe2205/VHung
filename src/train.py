@@ -237,18 +237,19 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                 loss_cts += torch.abs(tf_n @ tf_a)
             loss_cts = loss_cts / 13 * 1e-1
 
-            # New losses (phase-gated)
+            # Localization losses — anomaly videos only (second half of batch)
+            B_half = n_feat.shape[0]
             if lam1 > 0:
                 logits1_2d = logits1.squeeze(-1)                          # [2B, T]
                 mask_T = (torch.arange(logits1_2d.shape[1], device=device)
                           .unsqueeze(0) < lengths.unsqueeze(1))            # [2B, T]
                 if args.focal_gamma > 0:
-                    loss_fbce = focal_bce_loss(logits1_2d, y_bin, mask_T,
-                                               pos_weight_bin,
+                    loss_fbce = focal_bce_loss(logits1_2d[B_half:], y_bin[B_half:],
+                                               mask_T[B_half:], pos_weight_bin,
                                                gamma=args.focal_gamma)
                 else:
-                    loss_fbce = frame_bce_loss(logits1_2d, y_bin, mask_T,
-                                               pos_weight_bin)
+                    loss_fbce = frame_bce_loss(logits1_2d[B_half:], y_bin[B_half:],
+                                               mask_T[B_half:], pos_weight_bin)
             else:
                 loss_fbce = torch.zeros(1, device=device)
 
@@ -270,9 +271,8 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             else:
                 loss_ctr = torch.zeros(1, device=device)
 
-            # Boundary loss — only on abnormal videos (second half of batch)
+            # Boundary loss — anomaly only
             bnd_gate = 1.0 if lam1 > 0 else 0.0
-            B_half = n_feat.shape[0]  # first B_half = normal, rest = anomaly
             if bnd_gate > 0 and args.lambda_boundary > 0:
                 if 'mask_T' not in locals():
                     logits1_2d_ = logits1.squeeze(-1)

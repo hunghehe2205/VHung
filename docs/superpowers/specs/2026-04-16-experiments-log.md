@@ -263,6 +263,36 @@ Train dataset có 10 crops/video (`__0..__9`). Test chỉ dùng `__0`. Trong lý
 
 - `top_2` cap trong proposal generation → new default inference strategy. Apply vào `_loc_map_abnormal_only` và `_loc_map_agnostic` (thêm 1 dòng `keep = keep[:2]` sau NMS).
 - **Không retrain required** — tách hoàn toàn inference logic, checkpoint Exp 12 giữ nguyên.
+- Commit: `50044ea9` (2026-04-17).
+
+### Verify sau khi apply vào code chính (real `test.py`)
+
+```
+AUC1=0.8557  AP1=0.2919  |  AUC2=0.8434  AP2=0.2698
+[all-vid ] AVG=24.43  [45.03/33.02/23.53/12.75/7.83]
+[abn-only] AVG=24.86  [45.92/33.59/23.94/12.93/7.93]
+```
+
+| | Before top_2 | After top_2 | Δ |
+|---|---:|---:|---:|
+| all-vid mAP | 23.68 | **24.43** | +0.75 |
+| abn-only mAP | 24.06 | **24.86** | +0.80 |
+| AUC1 | 0.8557 | 0.8557 | 0 |
+
+Real result cao hơn 0.09 so với sweep script (24.77) vì `_loc_map_abnormal_only` dùng scoring gốc `score + 0.7*c_s` (sweep cũng vậy — chênh là do `_loc_map_abnormal_only` filter video trước khi nhúng proposals vào flat list, thay vì filter sau). 13/13 existing tests pass.
+
+### Phase A — ablate existing losses (pending)
+
+Training hiện tại sum 7 losses. Trước khi add mới, ablate để tìm dead weight:
+
+| Flag | Loại bỏ | Lý do nghi |
+|---|---|---|
+| `--lambda-nce 0` | CLASM class-aware MIL | Eval class-agnostic — nce có thể redundant |
+| `--lambda-cts 0` | text divergence | Weight internal ×0.1 quá nhỏ — có thể ghost |
+
+Decision rule: Δ < 0.5 mAP khi bỏ → drop permanently.
+
+Flags đã thêm vào `option.py` (default 1.0, backward-compatible).
 
 ---
 
@@ -286,7 +316,7 @@ Train dataset có 10 crops/video (`__0..__9`). Test chỉ dùng `__0`. Trong lý
 | 13 | separate optim + Gaussian + no offset | 17.94 | 0.8479 | full detach kills backbone signal |
 | 14 | fbce abn-only + no boundary | 19.85 | 0.8486 | worse — needs fbce on normal + bnd |
 | 15 | drop offset heads (keep cls sel backprop) | 21.27 | 0.8549 | FAIL — peak ep10 then flat, RNG drift suspected |
-| **Exp12+top2** | **inference: `top_2` cap on Exp 12** | **24.77** | 0.8557 | **Best overall. No retrain** |
+| **Exp12+top2** | **inference: `top_2` cap on Exp 12** | **24.86** | 0.8557 | **Best overall. No retrain (real test.py)** |
 
 \* _Eval cũ (gtpos=306), chưa re-eval_
 
@@ -299,7 +329,7 @@ Train dataset có 10 crops/video (`__0..__9`). Test chỉ dùng `__0`. Trong lý
 | Exp 10 | 39.94 | 29.55 | 17.67 | 9.57 | 4.71 | 20.29 |
 | Exp 11 | 41.39 | 29.41 | 19.83 | 9.85 | 5.25 | 21.15 |
 | **Exp 12** | **44.84** | **32.87** | **22.62** | **12.37** | **7.59** | **24.06** |
-| **Exp12+top2** | **45.92** | **33.59** | **23.72** | **12.83** | **7.81** | **24.77** |
+| **Exp12+top2** | **45.92** | **33.59** | **23.94** | **12.93** | **7.93** | **24.86** |
 
 ### Key insights
 

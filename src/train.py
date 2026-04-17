@@ -118,6 +118,25 @@ def within_video_contrast_loss(probs, target, mask, margin=0.3):
     return (gap_loss * has_inside).sum() / has_inside.sum().clamp_min(1.0)
 
 
+def boundary_sharp_loss(probs, target, mask, margin=0.5):
+    """Local separation AT GT boundaries. Targets boundary_sharpness=0.008
+    diagnostic (Exp 12): at every frame where target transitions (start or
+    end of GT), enforce |Δprob| >= margin. Anomaly-only (no transitions in
+    normal videos → weight is 0).
+
+    Different from within_video_contrast_loss (global mean separation):
+    this loss does NOT care about uniform inside-high outside-low, only
+    about producing a SHARP edge at the right frame. Complements Dice
+    (which measures area overlap, not edge steepness).
+    """
+    mask_diff = (mask[:, 1:] & mask[:, :-1]).float()                    # [B, T-1]
+    target_diff = (target[:, 1:] - target[:, :-1]).abs()                # {0, 1}
+    prob_diff = (probs[:, 1:] - probs[:, :-1]).abs()
+    weight = mask_diff * target_diff                                    # 1 only at transitions
+    gap = F.relu(margin - prob_diff)
+    return (gap * weight).sum() / weight.sum().clamp_min(1.0)
+
+
 def frame_bce_loss(logits, target, mask, pos_weight):
     """Frame-level binary BCE on logits1 with scalar pos_weight.
     logits: [B, T] raw logits.
@@ -276,8 +295,12 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                 loss_p3 = torch.zeros(1, device=device)
 
             if lam2 > 0 and args.lambda_contrast > 0:
-                loss_ctr = within_video_contrast_loss(
-                    probs, y_bin, mask_T2, margin=args.contrast_margin)
+                if args.contrast_type == 'boundary_sharp':
+                    loss_ctr = boundary_sharp_loss(
+                        probs, y_bin, mask_T2, margin=args.contrast_margin)
+                else:
+                    loss_ctr = within_video_contrast_loss(
+                        probs, y_bin, mask_T2, margin=args.contrast_margin)
             else:
                 loss_ctr = torch.zeros(1, device=device)
 

@@ -404,6 +404,86 @@ python -u src/train.py \
     | tee logs/train_exp16_tversky.log
 ```
 
+**Results (final ep20)**: mAP_abn **20.86 (ep18 best)** [38.09/28.32/19.61/12.32/5.97], AUC=0.8545. **FAIL — Δ = −3.20 vs Exp 12**, worse than A1 and A2.
+
+| Ep | Exp 12 | Exp 16 | Δ |
+|---:|---:|---:|---:|
+| 7 | 20.83 | 19.16 | −1.67 |
+| 11 | 23.54 | 19.68 | −3.86 |
+| 15 | 23.93 | 19.96 | −3.97 |
+| 18 | — | **20.86** | — |
+| 20 | 23.98 | 20.79 | −3.19 |
+
+**Per-IoU ep18 vs Exp 12 ep17** — chữ ký over-shrink:
+
+| | @0.1 | @0.2 | @0.3 | @0.4 | @0.5 |
+|---|---:|---:|---:|---:|---:|
+| Δ | −6.75 | −4.55 | −3.01 | **−0.05** | −1.62 |
+
+Mất nặng ở lose IoU (recall sụp) nhưng @0.4 **gần bằng** — prediction tight hơn nhưng miss GT. Classic over-shrink.
+
+**Diag Exp 16 confirm 2 insight quan trọng**:
+
+| Metric | Exp 12 | Exp 16 | Δ |
+|---|---:|---:|---:|
+| peak_in_gt_ratio | 0.321 | 0.364 | +0.04 |
+| **coverage_inside** | **0.958** | **0.728** | **−0.23** 🔴 |
+| **over_coverage** | **2.497** | **2.344** | **−0.15** ⚠️ |
+| boundary_sharp | 0.008 | 0.008 | 0 ⚠️ |
+
+- **Tversky shrink uniform**: coverage rớt 23pp (27% GT frames nay < 0.5) nhưng `over_coverage` chỉ giảm 0.15 → **Tversky là sai tool**. Adaptive threshold `max − 0.6·(max − min)` tự normalize theo max → shrink uniform không làm hẹp segment width.
+- **Boundary vẫn flat**: 0.008 không đổi. Tversky không đụng edge.
+
+**Kết luận: Tversky không phải cách giải quyết over-coverage + soft boundary**. Tuning α milder cũng vô nghĩa (α=0.6 sẽ reduce over_cov càng ít).
+
+#### Exp 17 — REPLACE contrast → boundary_sharp_loss
+
+**Motivation**: Exp 16 diag thấy `boundary_sharp = 0.008` (gần flat) ở cả baseline và Exp 12. Không loss hiện tại force sharp edges. Contrast loss (mean_inside vs mean_outside) thoả mãn được bằng uniform — không tạo biên sắc.
+
+**Design**: REPLACE `within_video_contrast_loss` bằng `boundary_sharp_loss` tại cùng vị trí, cùng weight `λ_contrast=1.0`. Loss count giữ 7.
+
+```python
+def boundary_sharp_loss(probs, target, mask, margin=0.5):
+    """At every GT transition (start or end), force |Δprob| ≥ margin."""
+    mask_diff   = (mask[:, 1:] & mask[:, :-1]).float()
+    target_diff = (target[:, 1:] - target[:, :-1]).abs()     # 1 at transitions
+    prob_diff   = (probs[:, 1:] - probs[:, :-1]).abs()
+    weight = mask_diff * target_diff
+    gap = F.relu(margin - prob_diff)
+    return (gap * weight).sum() / weight.sum().clamp_min(1.0)
+```
+
+**Tại sao thay được contrast**:
+- Cùng role "inside vs outside separation" trên anomaly videos
+- Cùng gate (anomaly-only tự nhiên: normal video target all-0 → no transitions → weight 0)
+- Local version (tại biên) thay global version (mean)
+
+**Targets** (từ diag baseline vs Exp 12):
+- `boundary_sharpness ≥ 0.1` (target từ 0.008 hiện tại → gấp 12×)
+- `over_coverage ≤ 2.0` (giảm vì biên sắc không lan ra xa)
+- `coverage_inside ≥ 0.90` (không bị Tversky-shrink vì loss khác bản chất)
+- `mAP_abn > 24.86` (beat current best)
+
+**Training command**:
+```bash
+python -u src/train.py \
+    --focal-gamma 0 \
+    --phase3-loss dice \
+    --lambda2 1.0 \
+    --lambda-contrast 1.0 \
+    --contrast-type boundary_sharp \
+    --contrast-margin 0.5 \
+    --pos-weight 1.0 \
+    --lambda-boundary 1.5 \
+    --boundary-pos-weight 10.0 \
+    --inference threshold \
+    --max-epoch 20 \
+    --scheduler-milestones 6 11 \
+    --model-path final_model/model_exp17_bsharp.pth \
+    --checkpoint-path final_model/ckpt_exp17_bsharp.pth \
+    | tee logs/train_exp17_bsharp.log
+```
+
 ---
 
 ## 4. Tóm tắt
@@ -428,7 +508,8 @@ python -u src/train.py \
 | 15 | drop offset heads (keep cls sel backprop) | 21.27 | 0.8549 | FAIL — peak ep10 then flat, RNG drift suspected |
 | A1 | `--lambda-nce 0` (drop CLASM) | 21.96 | 0.8543 | FAIL — Δ=−2.10 vs Exp 12, nce load-bearing |
 | A2 | `--lambda-cts 0` (drop text div) | 22.77 | 0.8467 | FAIL — Δ=−1.21 vs Exp 12, cts load-bearing |
-| 16 | REPLACE Dice → Tversky(0.7, 0.3) | TBD | TBD | Targeting over_cov ↓ and spillover ↓ |
+| 16 | REPLACE Dice → Tversky(0.7, 0.3) | 20.86 | 0.8545 | FAIL — Δ=−3.20, over-shrink (coverage 0.958→0.728) |
+| 17 | REPLACE contrast → boundary_sharp | TBD | TBD | Targeting boundary_sharp=0.008 flat → ≥0.1 |
 | **Exp12+top2** | **inference: `top_2` cap on Exp 12** | **24.86** | 0.8557 | **Best overall. No retrain (real test.py)** |
 
 \* _Eval cũ (gtpos=306), chưa re-eval_

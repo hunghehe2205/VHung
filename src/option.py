@@ -62,7 +62,12 @@ parser.add_argument('--tversky-beta', default=0.3, type=float,
 parser.add_argument('--lambda-contrast', default=0.0, type=float,
                     help='Weight for within-video contrast loss (Phase 3). 0 = off')
 parser.add_argument('--contrast-margin', default=0.3, type=float,
-                    help='Margin for within-video contrast loss')
+                    help='Margin for contrast loss (shared by mean and boundary_sharp)')
+parser.add_argument('--contrast-type', default='mean',
+                    choices=['mean', 'boundary_sharp'],
+                    help='mean = global inside/outside mean gap (Exp 12). '
+                         'boundary_sharp = local |Δprob| at GT transitions '
+                         '(Exp 17 target: boundary_sharp diag metric).')
 parser.add_argument('--lambda-boundary', default=0.5, type=float,
                     help='Weight for start/end boundary BCE (Phase 2+). 0 = off')
 parser.add_argument('--boundary-sigma', default=1.0, type=float,

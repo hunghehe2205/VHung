@@ -131,16 +131,29 @@
 | 5 | P2 | 0.547 | 0.097 | 18.87 | 39.49/28.25/15.19/7.69/3.75 | 0.8541 |
 | 7 | P3 | 0.543 | 0.096 | 20.83 | 42.41/30.06/17.97/9.16/4.55 | 0.8551 |
 | 11 | P3 | 0.542 | 0.096 | 23.54 | 44.28/32.30/22.11/11.93/7.07 | 0.8545 |
-| 13 | P3 | 0.542 | 0.096 | 23.77 | 44.33/32.63/22.42/12.23/7.23 | 0.8554 |
-| **15** | P3 | 0.542 | 0.096 | **23.93** | **44.84/32.88/22.58/12.32/7.05** | 0.8555 |
+| 15 | P3 | 0.542 | 0.096 | 23.93 | 44.84/32.88/22.58/12.32/7.05 | 0.8555 |
+| **17** | P3 | 0.542 | 0.096 | **24.06** | **44.84/32.87/22.62/12.37/7.59** | 0.8557 |
+| 20 | P3 | 0.542 | 0.096 | 23.98 | 44.70/32.91/22.64/12.40/7.27 | 0.8558 |
 
-Best: **mAP_abn=23.93 (ep15)**, AUC=0.8555. **New best, vượt Exp 6 (21.71).**
+Best: **mAP_abn=24.06 (ep17, 20ep run)**, AUC=0.8557. **Best overall.** Ep15-20 saturate (+0.13 vs 15ep run).
 
-**Kết luận: mAP improvement đến từ Dice + contrast + abnormal-only training, KHÔNG phải boundary heads.**
-- `bnd_off = 0.096` flat suốt — offset head vẫn dead dù có selective backprop
-- `bnd_cls` giảm rất chậm (0.599→0.541) — cls head gần như không học
-- Scheduler fix [6,11] cho heads 2 epoch full LR, nhưng với detached offset head thì không đủ
-- Backbone không bị hurt (AUC ổn định ~0.855)
+**Kết luận:**
+- mAP improvement đến từ Dice + contrast + scheduler fix, boundary heads vẫn dead (bnd_off=0.096 flat, bnd_cls=0.542)
+- Nhưng boundary selective backprop hoạt động như **auxiliary task regularization** — gradient qua x_pre giúp backbone preserve temporal features
+- Bỏ boundary (Exp 14) hoặc full detach (Exp 13) đều kém hơn → boundary gradient cần thiết dù heads không learn
+
+#### Exp 13 — Separate optimizer + Gaussian targets + drop offset (FAIL)
+- Fix 3 root causes: separate head optimizer (LR=2e-4, no decay), Gaussian-smoothed targets (sigma=2), bỏ offset.
+- Full detach: `x_pre.detach()` → backbone mất auxiliary gradient.
+- bnd loss giảm (1.627→1.553) — heads thực sự learn, nhưng mAP plateau ở ~18.
+- Best: **mAP_abn=17.94 (ep9)**, AUC=0.8479. Gap vs Exp 12 widening mỗi epoch.
+- **Kết luận: FAIL.** Heads học được nhưng full detach làm backbone mất signal hữu ích.
+
+#### Exp 14 — fbce anomaly-only + bỏ boundary (FAIL)
+- Ý tưởng: Normal videos chỉ MIL (video-level), localization losses chỉ trên anomaly.
+- `--lambda-boundary 0` bỏ boundary hoàn toàn.
+- Best: **mAP_abn=19.85 (ep7)**, AUC=0.8486. Tệ hơn Exp 13.
+- **Kết luận: FAIL.** Bỏ fbce trên normal → AUC giảm (backbone kém suppress normal). Bỏ boundary → mất auxiliary gradient.
 
 ---
 
@@ -160,7 +173,9 @@ Best: **mAP_abn=23.93 (ep15)**, AUC=0.8555. **New best, vượt Exp 6 (21.71).**
 | 9 | BSN v1: start/end heads | 2.16 (BSN) | 0.8404 | heads quá yếu |
 | 10 | BSN v2: x_diff + offset | **20.29** | 0.8631 | x_diff work, < Exp6 |
 | 11 | Exp10 + stop-gradient | **21.15** | 0.8619 | backbone recover, heads frozen |
-| **12** | **selective backprop + abn-only bnd** | **23.93** | 0.8555 | **New best. Heads still dead** |
+| **12** | **selective backprop + abn-only bnd** | **24.06** | 0.8557 | **Best. 20ep, auxiliary gradient** |
+| 13 | separate optim + Gaussian + no offset | 17.94 | 0.8479 | full detach kills backbone signal |
+| 14 | fbce abn-only + no boundary | 19.85 | 0.8486 | worse — needs fbce on normal + bnd |
 
 \* _Eval cũ (gtpos=306), chưa re-eval_
 
@@ -172,19 +187,20 @@ Best: **mAP_abn=23.93 (ep15)**, AUC=0.8555. **New best, vượt Exp 6 (21.71).**
 | Exp 6 | 42.03 | 30.20 | 19.21 | 11.10 | 6.04 | 21.71 |
 | Exp 10 | 39.94 | 29.55 | 17.67 | 9.57 | 4.71 | 20.29 |
 | Exp 11 | 41.39 | 29.41 | 19.83 | 9.85 | 5.25 | 21.15 |
-| **Exp 12** | **44.84** | **32.88** | **22.58** | **12.32** | **7.05** | **23.93** |
+| **Exp 12** | **44.84** | **32.87** | **22.62** | **12.37** | **7.59** | **24.06** |
 
 ### Key insights
 
 1. **Loss tuning** (Exp 1-5): Dice > TV > IoU. Plain BCE > focal. Loss ceiling ~11.70.
 2. **Debias** (Exp 6): pw=1.0 + contrast loss phá ceiling. Ép peak đúng GT position → +5.65 mAP vs baseline.
 3. **Architecture**: Đừng touch temporal mixing — wider = worse @0.4-0.5 (Exp 7). Sim GCN beneficial (Exp 8).
-4. **Boundary heads** (Exp 9-12): x_diff giúp heads learn (Exp 10), nhưng backprop hurt backbone. Detach/selective backprop bảo vệ backbone nhưng heads frozen (bnd_off=0.096 flat, bnd_cls barely moves). Root causes: extreme sparsity (~2/256 positives), LR coupling, insufficient signal.
-5. **Exp 12 gains = Dice + contrast + scheduler fix**, không phải boundary heads. Scheduler [6,11] cho backbone train lâu hơn ở full LR → mAP +2.2 vs Exp 6.
-6. **FP trên Normal videos**: 100% có proposals do adaptive threshold relative. Cần threshold filtering hoặc absolute minimum score.
+4. **Boundary heads as auxiliary regularizer** (Exp 9-14): Heads bản thân không learn (bnd flat). Nhưng selective backprop (cls → backbone) cung cấp auxiliary gradient giúp backbone preserve temporal features. Bỏ boundary (Exp 14) hoặc full detach (Exp 13) → mAP giảm 4-6 points.
+5. **fbce trên normal videos cần thiết** (Exp 14): Bỏ fbce trên normal → AUC giảm, backbone kém suppress normal scores.
+6. **Scheduler [6,11]** cho backbone train lâu hơn ở full LR → +2.2 mAP vs Exp 6.
+7. **Model saturate ở ~24 mAP** (20ep). Ep15-20 chỉ +0.13.
 
 ### Bottleneck hiện tại
 
-- **Exp 12 = best** (23.93). Boundary heads 3 experiment liên tiếp không learn.
-- **Chưa thử**: (1) Separate optimizer/LR cho heads, (2) Gaussian-smoothed targets giảm sparsity, (3) Bỏ offset (dead weight) chỉ giữ cls.
-- **Next**: Exp 13 — fix 3 root causes cùng lúc.
+- **Exp 12 = best** (24.06, 20ep). Model saturate — thêm epochs không giúp.
+- **Boundary heads = useful auxiliary signal** dù không learn. Không nên bỏ.
+- **Next**: Exp 15 — Exp 12 nhưng bỏ offset heads (confirmed dead weight, bnd_off=0.096 flat 16 epochs). Giữ cls selective backprop.

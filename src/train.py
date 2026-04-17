@@ -143,32 +143,14 @@ def get_lambda(epoch, phase1_epochs, phase2_epochs, lambda1, lambda2):
         return float(lambda1), float(lambda2)
 
 
-def boundary_offset_loss(start_logits, end_logits,
-                         start_cls_tgt, end_cls_tgt,
-                         start_off_tgt, end_off_tgt,
-                         mask, pos_weight=10.0, return_components=False):
-    """BCE for start/end classification + smooth L1 for offset at positive snippets.
-    start_logits/end_logits: [B, T, 2] — channel 0 = cls logit, channel 1 = offset logit.
-    """
+def boundary_cls_loss(start_logits, end_logits, start_tgt, end_tgt,
+                      mask, pos_weight=10.0):
+    """BCE for start/end boundary cls. Logits [B, T, 1], targets [B, T]."""
     pw = torch.tensor([pos_weight], device=mask.device)
-    s_cls = start_logits[..., 0]   # [B, T]
-    e_cls = end_logits[..., 0]
-    loss_cls = (
-        F.binary_cross_entropy_with_logits(s_cls[mask], start_cls_tgt[mask], pos_weight=pw) +
-        F.binary_cross_entropy_with_logits(e_cls[mask], end_cls_tgt[mask], pos_weight=pw))
-
-    s_off = torch.sigmoid(start_logits[..., 1])
-    e_off = torch.sigmoid(end_logits[..., 1])
-    s_pos = (start_cls_tgt > 0.5) & mask
-    e_pos = (end_cls_tgt > 0.5) & mask
-    loss_off = torch.zeros(1, device=mask.device)
-    if s_pos.any():
-        loss_off = loss_off + F.smooth_l1_loss(s_off[s_pos], start_off_tgt[s_pos])
-    if e_pos.any():
-        loss_off = loss_off + F.smooth_l1_loss(e_off[e_pos], end_off_tgt[e_pos])
-    if return_components:
-        return loss_cls, loss_off
-    return loss_cls + loss_off
+    s = start_logits.squeeze(-1)
+    e = end_logits.squeeze(-1)
+    return (F.binary_cross_entropy_with_logits(s[mask], start_tgt[mask], pos_weight=pw) +
+            F.binary_cross_entropy_with_logits(e[mask], end_tgt[mask], pos_weight=pw))
 
 
 def train(model, normal_loader, anomaly_loader, testloader, args, label_map, device):
@@ -208,7 +190,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                                 args.lambda1, args.lambda2)
         model.train()
         sum_bce_v = sum_nce = sum_cts = sum_fbce = sum_p3 = sum_ctr = 0.0
-        sum_bnd_cls = sum_bnd_off = 0.0
+        sum_bnd = 0.0
         n_iters = min(len(normal_loader), len(anomaly_loader))
         t_start = time.time()
         pbar = tqdm(range(n_iters),
@@ -227,8 +209,6 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             bnd_targets = torch.cat([n_bnd, a_bnd], dim=0).to(device)    # [2B, 4, T]
             s_cls_tgt = bnd_targets[:, 0]  # [2B, T]
             e_cls_tgt = bnd_targets[:, 1]
-            s_off_tgt = bnd_targets[:, 2]
-            e_off_tgt = bnd_targets[:, 3]
             text_labels = list(n_lab) + list(a_lab)
             lengths = torch.cat([n_len, a_len], dim=0).to(device)
             text_labels_t = get_batch_label(text_labels, prompt_text, label_map).to(device)
@@ -288,20 +268,17 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                     logits1_2d_ = logits1.squeeze(-1)
                     mask_T = (torch.arange(logits1_2d_.shape[1], device=device)
                               .unsqueeze(0) < lengths.unsqueeze(1))
-                loss_bnd_cls, loss_bnd_off = boundary_offset_loss(
+                loss_bnd = boundary_cls_loss(
                     start_logits[B_half:], end_logits[B_half:],
                     s_cls_tgt[B_half:], e_cls_tgt[B_half:],
-                    s_off_tgt[B_half:], e_off_tgt[B_half:],
-                    mask_T[B_half:], pos_weight=args.boundary_pos_weight,
-                    return_components=True)
+                    mask_T[B_half:], pos_weight=args.boundary_pos_weight)
             else:
-                loss_bnd_cls = torch.zeros(1, device=device)
-                loss_bnd_off = torch.zeros(1, device=device)
+                loss_bnd = torch.zeros(1, device=device)
 
             loss = (loss_bce_v + loss_nce + loss_cts
                     + lam1 * loss_fbce + lam2 * loss_p3
                     + args.lambda_contrast * loss_ctr
-                    + bnd_gate * args.lambda_boundary * (loss_bnd_cls + 10.0 * loss_bnd_off))
+                    + bnd_gate * args.lambda_boundary * loss_bnd)
 
             optimizer.zero_grad()
             loss.backward()
@@ -313,8 +290,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             sum_fbce  += float(loss_fbce)
             sum_p3    += float(loss_p3)
             sum_ctr   += float(loss_ctr)
-            sum_bnd_cls += float(loss_bnd_cls)
-            sum_bnd_off += float(loss_bnd_off)
+            sum_bnd += float(loss_bnd)
             pbar.set_postfix(bce_v=sum_bce_v / (i + 1),
                              nce=sum_nce / (i + 1),
                              cts=sum_cts / (i + 1),
@@ -329,8 +305,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         avg_fbce = sum_fbce / n_iters
         avg_p3 = sum_p3 / n_iters
         avg_ctr = sum_ctr / n_iters
-        avg_bnd_cls = sum_bnd_cls / n_iters
-        avg_bnd_off = sum_bnd_off / n_iters
+        avg_bnd = sum_bnd / n_iters
 
         # End-of-epoch eval — model selection on abnormal-only mAP
         AUC, avg_mAP_abn, dmap_abn, dmap_bsn, bsn_stats = test(
@@ -355,7 +330,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
               f'lam=({lam1},{lam2}) | '
               f'bce_v={avg_bce_v:.3f} nce={avg_nce:.3f} cts={avg_cts:.4f} '
               f'fbce={avg_fbce:.3f} p3={avg_p3:.3f} ctr={avg_ctr:.3f} '
-              f'bnd_cls={avg_bnd_cls:.3f} bnd_off={avg_bnd_off:.3f} | '
+              f'bnd={avg_bnd:.3f} | '
               f'AUC={AUC:.4f} mAP_abn={avg_mAP_abn:.2f} [{abn_str}]{bsn_str}{tag}',
               flush=True)
         if is_best:

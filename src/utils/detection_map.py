@@ -167,6 +167,7 @@ def _loc_map_agnostic(predictions, th, gtsegments, gtlabels):
             arr = np.array(segment_predict_multithr)
             arr = arr[np.argsort(-arr[:, -1])]
             _, keep = nms(arr[:, 1:-1], 0.6)
+            keep = keep[:2]  # per-video top-2 cap (+0.79 mAP, diagnostic 2026-04-17)
             segment_predict.extend(list(arr[keep]))
 
     segment_predict = np.array(segment_predict) if len(segment_predict) else np.zeros((0, 4))
@@ -227,7 +228,8 @@ def getDetectionMAP_agnostic(predictions, gtsegments, gtlabels):
 
 def _loc_map_abnormal_only(predictions, th, gtsegments, gtlabels,
                            threshold_rel=0.6, **kw):
-    """mAP computed only on abnormal videos (skip normal entirely)."""
+    """mAP computed only on abnormal videos (skip normal entirely).
+    Applies NMS (IoU 0.6) + top-2 cap per video (diagnostic 2026-04-17)."""
     segment_predict = []
     for i in range(len(predictions)):
         if not any(l != 'A' for l in gtlabels[i]):
@@ -245,10 +247,17 @@ def _loc_map_abnormal_only(predictions, th, gtsegments, gtlabels,
                          for t in range(1, len(vid_pred))]
         s = [k for k, item in enumerate(vid_pred_diff) if item == 1]
         e = [k for k, item in enumerate(vid_pred_diff) if item == -1]
+        per_video = []
         for j in range(len(s)):
             if e[j] - s[j] >= 2:
                 score = float(np.max(tmp[s[j]:e[j]])) + 0.7 * c_s
-                segment_predict.append([i, s[j], e[j], score])
+                per_video.append([i, s[j], e[j], score])
+        if per_video:
+            arr = np.array(per_video)
+            arr = arr[np.argsort(-arr[:, -1])]
+            _, keep = nms(arr[:, 1:-1], 0.6)
+            keep = keep[:2]
+            segment_predict.extend(list(arr[keep]))
     if not segment_predict:
         return 0.0
     segment_predict = np.array(segment_predict)

@@ -275,7 +275,9 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             else:
                 loss_bnd = torch.zeros(1, device=device)
 
-            loss = (loss_bce_v + loss_nce + loss_cts
+            loss = (loss_bce_v
+                    + args.lambda_nce * loss_nce
+                    + args.lambda_cts * loss_cts
                     + lam1 * loss_fbce + lam2 * loss_p3
                     + args.lambda_contrast * loss_ctr
                     + bnd_gate * args.lambda_boundary * loss_bnd)

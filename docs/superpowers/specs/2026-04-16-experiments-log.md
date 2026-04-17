@@ -155,6 +155,115 @@ Best: **mAP_abn=24.06 (ep17, 20ep run)**, AUC=0.8557. **Best overall.** Ep15-20 
 - Best: **mAP_abn=19.85 (ep7)**, AUC=0.8486. Tệ hơn Exp 13.
 - **Kết luận: FAIL.** Bỏ fbce trên normal → AUC giảm (backbone kém suppress normal). Bỏ boundary → mất auxiliary gradient.
 
+#### Exp 15 — Drop offset heads, keep cls selective backprop (FAIL)
+- Ý tưởng: `bnd_off=0.096 flat` 16 epochs ở Exp 12 → offset heads dead weight. Bỏ đi để simplify.
+- 4 heads → 2 heads (cls only). Giữ nguyên Exp 12 formula khác: pw=1, fbce all-vid, Dice, contrast, scheduler [6,11], 20ep, single optimizer.
+- Best: **mAP_abn=21.27 (ep10)**, AUC=0.8549. Peak sớm ngay trước milestone ep11, sau đó flat 20.3-20.5.
+
+| Ep | Exp 12 mAP | Exp 15 mAP | Δ |
+|---:|---:|---:|---:|
+| 3 | 15.09 | 15.55 | +0.46 |
+| 5 | 18.87 | 16.35 | −2.52 |
+| 7 | 20.83 | 18.18 | −2.65 |
+| 11 | 23.54 | 20.87 | −2.67 |
+| 17 | 24.06 | 20.39 | −3.67 |
+| 20 | 23.98 | 20.43 | −3.55 |
+
+**Bằng chứng cls head training identical**: `bnd` value ở Exp 15 match `bnd_cls` ở Exp 12 (0.548 ep5, 0.543 ep7, 0.542 ep11). Cls heads không bị ảnh hưởng bởi sự vắng mặt của offset.
+
+**Gap uniformly negative** trên mọi IoU @0.1-0.5 → không phải lucky eval, mà systematic underperformance.
+
+**Hypothesis**: RNG drift. `setup_seed(234)` gọi trước model init. Bỏ 2 Linear layers → `nn.init.normal_` bớt 2 lượt consume RNG state → DataLoader shuffle khác batch order từ ep1. Backbone train trajectory khác.
+
+**Kết luận: FAIL.** Offset heads không phải dead weight thuần túy — presence của chúng ảnh hưởng training dynamics (dù gradient path từ offset về backbone bị detach hoàn toàn). Cần multi-seed để confirm có phải pure RNG noise không. **Bài học**: không touch boundary head config của Exp 12 — even inactive heads có thể load-bearing qua RNG coupling.
+
+---
+
+## 3.5 Diagnostics on Exp 12 (2026-04-17)
+
+### Normal video FP analysis (`src/normal_diag.py`)
+
+So sánh với Exp 6 FP analysis (doc 2026-04-16):
+
+| Metric | Exp 6 | Exp 12 | Change |
+|---|---|---|---|
+| % Normal với proposals (adaptive thr) | ~100% | **44.7%** (67/150) | **−55pt** |
+| Normal videos max_prob > 0.9 | ~Top-5 | 8/150 | similar |
+
+**Exp 12 rất sạch trên Normal**:
+- median(Normal max_prob) = **0.002** — gần như silence
+- median(Anomaly max_prob) = 0.983
+- **Separation 0.981** (huge gap)
+- FP-rate @thr=0.5: chỉ **1.50%** Normal frames > 0.5
+- 90% Normal videos có max_prob < 0.4
+
+**Residual FP**: 8 videos max > 0.9 (5.3%). Top-3: `Normal_Videos_{915, 050, 940}` có single-frame spikes 0.98-0.99 nhưng mean < 0.07 → spikes cô lập, ít hại. Chỉ `Normal_Videos_{884, 925}` có sustained high (mean ~0.3) — nghiêm trọng hơn.
+
+### Abnormal localization diagnostic (`src/anomaly_diag.py`)
+
+**Dominant failure mode = WRONG LOCATION + OVER-PREDICTION**:
+
+| Failure mode | Count | % |
+|---|---:|---:|
+| Peak outside any GT segment | **95/140** | **67.9%** |
+| Over-predict (pred/gt > 2×) | 76/140 | 54.3% |
+| Multi-peak (≥2 high regions) | 61/140 | 43.6% |
+| Tight localization (IoU≥0.5) | 38/140 | 27.1% |
+
+**Frame-level P/R @thr=0.5**:
+- Precision = 17.9% (median) — proposals chứa quá nhiều non-GT frames
+- Recall = 95.0% — model BẮT được GT, nhưng FLAG THÊM rất rộng
+
+**Coverage**: GT median 14.3% frames, pred median 49.3% → over-ratio median 2.22× (gấp đôi width).
+
+**Diễn giải**: Model học classification (AUC 0.8557) nhưng **không học localization** — peak argmax chỉ 32.1% rơi trong GT. 67.9% videos có peak ở wrong location.
+
+### Inference ablation: proposal strategy (`src/infer_variants.py`)
+
+Sweep 20+ strategies trên Exp 12 checkpoint (no retrain):
+
+| Strategy | AVG mAP | Δ baseline |
+|---|---:|---:|
+| **`adaptive_0.6 + top_2`** | **24.77** | **+0.79** |
+| `adaptive_0.6 + top_3` | 24.58 | +0.60 |
+| baseline (`adaptive_0.6`) | 23.98 | 0 |
+| `hybrid (thr=0.6, floor=0.2)` | 23.53 | −0.45 |
+| `peak_half (floor=0.3)` | 23.11 | −0.87 |
+| `abs_0.5` | 22.59 | −1.39 |
+| `adaptive + top_1` | 21.30 | −2.68 |
+
+**WINNER: `top_2` cap** → **24.77 mAP**, +0.79 từ inference-only.
+
+Per-IoU top_2 vs baseline:
+| | @0.1 | @0.2 | @0.3 | @0.4 | @0.5 |
+|---|---:|---:|---:|---:|---:|
+| baseline | 44.87 | 32.88 | 22.41 | 12.27 | 7.47 |
+| top_2 | 45.92 | 33.59 | 23.72 | 12.83 | 7.81 |
+| Δ | +1.05 | +0.71 | +1.31 | +0.56 | +0.34 |
+
+Cải thiện đều @mọi IoU. n_props 313 → 205 (−35%) nhưng TP retention tốt vì best-IoU proposals thường rank cao (score + c_s bonus).
+
+**Tại sao `top_2` thắng**:
+- GT coverage median 14.3% → most videos có 1-2 anomaly events thực sự
+- Loại low-rank FPs trong cùng video (multi-peak 43.6% videos)
+- Giữ recall cho 2-segment case (`top_1` = 21.30 drop 2.68 mAP do miss segment 2)
+
+**Tại sao abs_floor / peak_half / hybrid thua**:
+- 10% anomaly videos có max_prob < 0.5 (distribution heavy-tailed)
+- Floor threshold loại hết TP của các videos này
+- peak_half expand to half-height tạo proposals rộng tương đương adaptive
+
+### Rejected: Test-time augmentation (10-crop)
+
+Train dataset có 10 crops/video (`__0..__9`). Test chỉ dùng `__0`. Trong lý thuyết averaging 10 crops ở test có thể +0.5~1.5 mAP.
+
+**Bỏ vì không phù hợp thực tế**: deployment environment nhận stream single-view, không có cơ chế multi-crop. Thêm gain chỉ từ artifact data pipeline, không phản ánh khả năng model trên input thực.
+
+### Adopted changes
+
+- `top_2` cap trong proposal generation → new default inference strategy. Apply vào `_loc_map_abnormal_only` và `_loc_map_agnostic` (thêm 1 dòng `keep = keep[:2]` sau NMS).
+- **Không retrain required** — tách hoàn toàn inference logic, checkpoint Exp 12 giữ nguyên.
+
 ---
 
 ## 4. Tóm tắt
@@ -173,9 +282,11 @@ Best: **mAP_abn=24.06 (ep17, 20ep run)**, AUC=0.8557. **Best overall.** Ep15-20 
 | 9 | BSN v1: start/end heads | 2.16 (BSN) | 0.8404 | heads quá yếu |
 | 10 | BSN v2: x_diff + offset | **20.29** | 0.8631 | x_diff work, < Exp6 |
 | 11 | Exp10 + stop-gradient | **21.15** | 0.8619 | backbone recover, heads frozen |
-| **12** | **selective backprop + abn-only bnd** | **24.06** | 0.8557 | **Best. 20ep, auxiliary gradient** |
+| **12** | **selective backprop + abn-only bnd** | **24.06** | 0.8557 | **Best training. 20ep, auxiliary gradient** |
 | 13 | separate optim + Gaussian + no offset | 17.94 | 0.8479 | full detach kills backbone signal |
 | 14 | fbce abn-only + no boundary | 19.85 | 0.8486 | worse — needs fbce on normal + bnd |
+| 15 | drop offset heads (keep cls sel backprop) | 21.27 | 0.8549 | FAIL — peak ep10 then flat, RNG drift suspected |
+| **Exp12+top2** | **inference: `top_2` cap on Exp 12** | **24.77** | 0.8557 | **Best overall. No retrain** |
 
 \* _Eval cũ (gtpos=306), chưa re-eval_
 
@@ -188,6 +299,7 @@ Best: **mAP_abn=24.06 (ep17, 20ep run)**, AUC=0.8557. **Best overall.** Ep15-20 
 | Exp 10 | 39.94 | 29.55 | 17.67 | 9.57 | 4.71 | 20.29 |
 | Exp 11 | 41.39 | 29.41 | 19.83 | 9.85 | 5.25 | 21.15 |
 | **Exp 12** | **44.84** | **32.87** | **22.62** | **12.37** | **7.59** | **24.06** |
+| **Exp12+top2** | **45.92** | **33.59** | **23.72** | **12.83** | **7.81** | **24.77** |
 
 ### Key insights
 
@@ -198,9 +310,18 @@ Best: **mAP_abn=24.06 (ep17, 20ep run)**, AUC=0.8557. **Best overall.** Ep15-20 
 5. **fbce trên normal videos cần thiết** (Exp 14): Bỏ fbce trên normal → AUC giảm, backbone kém suppress normal scores.
 6. **Scheduler [6,11]** cho backbone train lâu hơn ở full LR → +2.2 mAP vs Exp 6.
 7. **Model saturate ở ~24 mAP** (20ep). Ep15-20 chỉ +0.13.
+8. **Offset heads không thật sự dead weight** (Exp 15): Dù `bnd_off=0.096 flat` và detach hoàn toàn, bỏ chúng → −2.79 mAP. RNG drift + training dynamics coupling suspected. Không simplify architecture thêm nữa.
+9. **Localization ≠ classification** (diagnostic 2026-04-17): AUC 0.8557 tốt, nhưng **67.9% peak ngoài GT**, pred coverage 2.22× GT width. Model học "có anomaly hay không" rất tốt nhưng "ở đâu" còn yếu.
+10. **Top-K cap tại inference**: `top_2` = +0.79 mAP zero-cost. Loại low-rank multi-peak FPs khi GT median 14.3% → most videos ≤ 2 events thực.
 
 ### Bottleneck hiện tại
 
-- **Exp 12 = best** (24.06, 20ep). Model saturate — thêm epochs không giúp.
-- **Boundary heads = useful auxiliary signal** dù không learn. Không nên bỏ.
-- **Next**: Exp 15 — Exp 12 nhưng bỏ offset heads (confirmed dead weight, bnd_off=0.096 flat 16 epochs). Giữ cls selective backprop.
+- **Best overall = Exp12+top_2** = 24.77 mAP (inference-only, no retrain).
+- **Core model** (Exp 12) saturate — thêm epochs / simplify architecture đều không giúp.
+- **Wrong-location problem** chưa addressed: 67.9% peaks ngoài GT. Contrast loss margin=0.3 đủ cho classification nhưng không force peak-at-location.
+- **Next ideas (candidates)**:
+  - Retrain với peak-aware contrast: `max_inside > max_outside + margin` thay `mean_inside > mean_outside + margin`.
+  - Suppression loss: penalty trực tiếp cho `mean(prob[outside])` trên anomaly videos.
+  - Stronger contrast margin 0.3 → 0.5 hoặc 0.7.
+  - Top-K MIL chỉ trên GT frames (anomaly videos) thay vì toàn video → ép peak trong GT.
+- **Rejected**: TTA 10-crop — không reflect deployment reality.

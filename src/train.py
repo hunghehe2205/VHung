@@ -86,6 +86,23 @@ def dice_loss_anomaly(probs, target, mask, eps=1.0):
     return ((1.0 - dice) * has_pos).sum() / has_pos.sum().clamp_min(1.0)
 
 
+def tversky_loss_anomaly(probs, target, mask, alpha=0.7, beta=0.3, eps=1.0):
+    """Asymmetric Dice: TP / (TP + α·FP + β·FN). α>β penalizes over-prediction
+    (FP) more than under-prediction (FN). Replaces symmetric Dice to address
+    the diagnosed over_coverage_ratio=2.5× and spillover_window=0.82 in Exp 12.
+    Anomaly-only gating same as dice_loss_anomaly.
+    """
+    mask_f = mask.float()
+    p = probs * mask_f
+    y = target * mask_f
+    tp = (p * y).sum(-1)
+    fp = (p * (1.0 - y)).sum(-1)
+    fn = ((1.0 - p) * y).sum(-1)
+    tversky = (tp + eps) / (tp + alpha * fp + beta * fn + eps)
+    has_pos = (y.sum(-1) > 0).float()
+    return ((1.0 - tversky) * has_pos).sum() / has_pos.sum().clamp_min(1.0)
+
+
 def within_video_contrast_loss(probs, target, mask, margin=0.3):
     """Per anomaly video: mean prob inside GT must exceed mean prob outside
     by at least `margin`. Forces peak AT the correct location rather than
@@ -249,6 +266,10 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             if lam2 > 0:
                 if args.phase3_loss == 'dice':
                     loss_p3 = dice_loss_anomaly(probs, y_bin, mask_T2)
+                elif args.phase3_loss == 'tversky':
+                    loss_p3 = tversky_loss_anomaly(
+                        probs, y_bin, mask_T2,
+                        alpha=args.tversky_alpha, beta=args.tversky_beta)
                 else:
                     loss_p3 = tv_smoothness_loss(probs, mask_T2)
             else:

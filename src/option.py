@@ -51,8 +51,14 @@ parser.add_argument('--lambda-cts', default=1.0, type=float,
                     help='Weight for text-feature divergence loss. 0 disables.')
 parser.add_argument('--focal-gamma', default=2.0, type=float,
                     help='0 = plain BCE, >0 = focal BCE with that gamma')
-parser.add_argument('--phase3-loss', default='tv', choices=['tv', 'dice'],
-                    help='Phase 3 localization loss: tv or dice')
+parser.add_argument('--phase3-loss', default='tv',
+                    choices=['tv', 'dice', 'tversky'],
+                    help='Phase 3 localization loss: tv, dice, or tversky')
+parser.add_argument('--tversky-alpha', default=0.7, type=float,
+                    help='Tversky FP penalty (higher α → penalize over-pred more). '
+                         'α=β=0.5 equals symmetric Dice.')
+parser.add_argument('--tversky-beta', default=0.3, type=float,
+                    help='Tversky FN penalty.')
 parser.add_argument('--lambda-contrast', default=0.0, type=float,
                     help='Weight for within-video contrast loss (Phase 3). 0 = off')
 parser.add_argument('--contrast-margin', default=0.3, type=float,

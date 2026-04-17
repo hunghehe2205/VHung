@@ -281,7 +281,7 @@ AUC1=0.8557  AP1=0.2919  |  AUC2=0.8434  AP2=0.2698
 
 Real result cao hơn 0.09 so với sweep script (24.77) vì `_loc_map_abnormal_only` dùng scoring gốc `score + 0.7*c_s` (sweep cũng vậy — chênh là do `_loc_map_abnormal_only` filter video trước khi nhúng proposals vào flat list, thay vì filter sau). 13/13 existing tests pass.
 
-### Phase A — ablate existing losses (pending)
+### Phase A — ablate existing losses
 
 Training hiện tại sum 7 losses. Trước khi add mới, ablate để tìm dead weight:
 
@@ -293,6 +293,116 @@ Training hiện tại sum 7 losses. Trước khi add mới, ablate để tìm de
 Decision rule: Δ < 0.5 mAP khi bỏ → drop permanently.
 
 Flags đã thêm vào `option.py` (default 1.0, backward-compatible).
+
+#### A1 — `--lambda-nce 0` (FAIL)
+
+Giữ nguyên Exp 12 formula, chỉ set `lambda_nce=0`. 20 epochs.
+
+| Ep | Exp 12 | A1 | Δ |
+|---:|---:|---:|---:|
+| 3 | 15.09 | 14.02 | −1.07 |
+| 5 | 18.87 | 18.72 | −0.15 |
+| 7 | 20.83 | 20.32 | −0.51 |
+| 11 | 23.54 | 21.67 | −1.87 |
+| 15 | 23.93 | 21.86 | −2.07 |
+| 17 | 24.06 | 21.92 | −2.14 |
+| **18** | — | **21.96** | — |
+| 20 | 23.98 | 21.90 | −2.08 |
+
+Best: **mAP_abn=21.96 (ep18)** [41.86/28.97/18.79/13.69/6.48], AUC=0.8543.
+
+**Gap mở từ P3** (ep7+), stabilize ~−2.1 từ ep15. A1 saturate sớm (ep14→ep18 chỉ +0.01) trong khi Exp 12 còn leo đến ep17.
+
+**Per-IoU gap (A1 ep18 vs Exp 12 ep17)**: lose IoU 0.1-0.3 mất nhiều (−3 đến −4 pts), IoU 0.4 gain nhẹ +1.32, IoU 0.5 mất −1.11. → A1 tạo proposals bớt accurate chứ không chỉ giảm count.
+
+**`cts` collapse**: A1 có `cts=0.0000` từ ep7 (P3) — không có `nce` training text embeddings thì `cts` regularizer không còn gì để regularize. `nce` + `cts` coupling chặt.
+
+**Kết luận: FAIL.** `nce` **load-bearing** dù eval class-agnostic. Đóng góp ~2 mAP qua: (1) text embedding diversity, (2) backbone representation richness qua class-specific MIL pools. **Giữ `nce`, không drop.**
+
+#### A2 — `--lambda-cts 0` (FAIL)
+
+Giữ nguyên Exp 12, set `lambda_cts=0`. `nce` vẫn train bình thường (1.634 → 0.118 ep20).
+
+| Ep | Exp 12 | A2 | Δ |
+|---:|---:|---:|---:|
+| 3 | 15.09 | **16.06** | **+0.97** |
+| 5 | 18.87 | 18.25 | −0.62 |
+| 7 | 20.83 | 20.23 | −0.60 |
+| 11 | 23.54 | 22.03 | −1.51 |
+| 17 | 24.06 | 22.67 | −1.39 |
+| **20** | 23.98 | **22.77** | **−1.21** |
+
+Best: **mAP_abn=22.77 (ep20)** [42.59/32.73/19.52/12.54/6.46], AUC=0.8467.
+
+ep3 A2 > Exp 12 (+0.97) — P1 warmup tốt hơn. Nhưng gap mở từ P3 (ep7+), stabilize ~−1.3 từ ep15. A2 saturate ep18-20 (+0.01 qua 3 ep).
+
+**Khác A1**: A2 chậm thoái hơn (gap cuối −1.21 vs A1 −2.10). `cts` đóng góp ít hơn `nce` nhưng vẫn load-bearing.
+
+**Kết luận: FAIL.** Giữ `cts`. Phase A xong: không có dead weight trong 7 losses.
+
+---
+
+### 3.6 Diagnose baseline vs Exp 12 (2026-04-18)
+
+Script: `src/diag_localization.py` + `src/diag_compare.py`. Report: `docs/diag/baseline_vs_exp12.md`.
+
+**D5 coverage quality là core diagnostic** (theo user feedback: "thật ra tôi muốn model over-coverage và giảm biên lại"):
+
+| Metric | Baseline | Exp 12 | Δ | Ý nghĩa |
+|---|---:|---:|---:|---|
+| peak_in_gt_ratio | 0.357 | 0.321 | −0.036 | Exp 12 KHÔNG cải thiện peak position |
+| peak_in_middle | 0.179 | 0.157 | −0.021 | Peak lệch GT ngay cả ở Exp 12 |
+| coverage_inside | 1.000 | 0.958 | −0.042 | Baseline cover ALL (flood), Exp 12 vẫn 96% |
+| spillover_window | **0.968** | **0.824** | **−0.144** | Exp 12 thu hẹp đáng kể |
+| boundary_sharp | 0.002 | 0.008 | +0.006 | **Cả hai ~0** — không có biên sắc |
+| over_coverage | **4.136** | **2.497** | **−1.638** | Exp 12 halved (4× → 2.5×) |
+| median IoU | 0.174 | 0.275 | +0.101 | |
+
+**Kết luận chẩn đoán**:
+- **Baseline = flood mode**: prob cao đều khắp video → cover 100% nhưng over_cov 4×, spillover 97%. Không phải "biết chỗ" mà là "nói gì cũng đúng".
+- **Exp 12 = scoped flood**: giảm spillover 97→82%, giảm over_cov 4×→2.5×. Coverage vẫn 96% → biết chỗ, nhưng lan rộng.
+- **Cả hai boundary_sharp ≈ 0**: không loss nào tạo edge sắc.
+
+**Primary bottleneck KHÔNG phải wrong-location** (coverage 96% chứng tỏ model biết chỗ). **LÀ over-coverage + soft boundary.** Peak-contrast ý tưởng cũ không fix được vì model không có wrong-peak issue primary.
+
+**Correct attack**: REPLACE một loss hiện tại bằng asymmetric signal phạt over-pred → Tversky Dice (α>β).
+
+---
+
+#### Exp 16 — REPLACE Dice → Tversky (α=0.7, β=0.3)
+
+**Hypothesis**: symmetric Dice `2·TP/(P+Y)` không phạt over-pred đặc biệt. Tversky `TP/(TP + α·FP + β·FN)` với α>β đánh mạnh FP (over-cov) ít hơn FN (miss). Cùng role (anomaly-only gate, weight λ2=1.0, eps=1.0 smoothing) nhưng kéo prediction width xuống.
+
+**Change**: 1 dòng trong `train.py` — `dice_loss_anomaly → tversky_loss_anomaly(α=0.7, β=0.3)`. Loss count giữ 7 (REPLACE, không ADD).
+
+**Targets** (monitor sau training bằng `diag_localization.py`):
+- `coverage_inside ≥ 0.90` (cho phép giảm nhẹ từ 0.958 của Exp 12)
+- `over_coverage_ratio < 1.5` (target từ 2.5 của Exp 12)
+- `spillover_window < 0.5` (target từ 0.82 của Exp 12)
+- `mAP_abn > 24.86` (beat current best)
+
+**Warning**: α=0.7 là aggressive. Nếu coverage sụp < 80% → model miss anomaly → giảm α xuống 0.6 hoặc 0.55.
+
+**Training command**:
+```bash
+python -u src/train.py \
+    --focal-gamma 0 \
+    --phase3-loss tversky \
+    --tversky-alpha 0.7 \
+    --tversky-beta 0.3 \
+    --lambda2 1.0 \
+    --lambda-contrast 1.0 \
+    --contrast-margin 0.3 \
+    --pos-weight 1.0 \
+    --lambda-boundary 1.5 \
+    --boundary-pos-weight 10.0 \
+    --inference threshold \
+    --max-epoch 20 \
+    --scheduler-milestones 6 11 \
+    --model-path final_model/model_exp16_tversky.pth \
+    --checkpoint-path final_model/ckpt_exp16_tversky.pth \
+    | tee logs/train_exp16_tversky.log
+```
 
 ---
 
@@ -316,6 +426,9 @@ Flags đã thêm vào `option.py` (default 1.0, backward-compatible).
 | 13 | separate optim + Gaussian + no offset | 17.94 | 0.8479 | full detach kills backbone signal |
 | 14 | fbce abn-only + no boundary | 19.85 | 0.8486 | worse — needs fbce on normal + bnd |
 | 15 | drop offset heads (keep cls sel backprop) | 21.27 | 0.8549 | FAIL — peak ep10 then flat, RNG drift suspected |
+| A1 | `--lambda-nce 0` (drop CLASM) | 21.96 | 0.8543 | FAIL — Δ=−2.10 vs Exp 12, nce load-bearing |
+| A2 | `--lambda-cts 0` (drop text div) | 22.77 | 0.8467 | FAIL — Δ=−1.21 vs Exp 12, cts load-bearing |
+| 16 | REPLACE Dice → Tversky(0.7, 0.3) | TBD | TBD | Targeting over_cov ↓ and spillover ↓ |
 | **Exp12+top2** | **inference: `top_2` cap on Exp 12** | **24.86** | 0.8557 | **Best overall. No retrain (real test.py)** |
 
 \* _Eval cũ (gtpos=306), chưa re-eval_

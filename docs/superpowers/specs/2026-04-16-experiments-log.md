@@ -521,6 +521,123 @@ Metric mục tiêu (`boundary_sharp`) **không chuyển động** (0.008 → 0.0
 3. **Exp 12's 7 losses hoạt động theo interplay**: thay 1 → cân bằng vỡ. Mean-contrast giữ `coverage_inside=0.958`; bỏ nó trong Exp 17 thấy drop ngay về 0.924 dù boundary_sharp thay thế chả làm gì.
 4. **Single-frame sharpness có thể không reachable qua loss alone** tại `attn_window=8 + linear upsample ×16`. Cần hoặc (a) đổi architecture (attn_window=1?), hoặc (b) sharpen ở inference (γ-power, proposal trim), hoặc (c) dạy sharpness qua signal khác (boundary-adjacent fbce reweighting trên snippet nearby GT edge — tác động trên hàng trăm frame thay vì ~2).
 
+#### Exp 18 — CLAS2 top-k-from-GT (hypothesis b3)
+
+**Motivation**: Diag Exp 12 cho thấy `peak_in_gt_ratio = 0.321` (67% peak nằm ngoài GT dù `coverage_inside = 0.958`). CLAS2 MIL hiện pool top-k toàn video → model học "video có anomaly" nhưng không bị force peak vào đúng vị trí. Phase B REPLACE (16, 17) đều FAIL → pivot sang **strengthen interplay** thay vì replace.
+
+**Design**: Modify `CLAS2` để anomaly videos pool top-k CHỈ từ inside-GT frames. Normal videos unchanged (weakly-supervised). Giữ nguyên Exp 12's 7 losses + hyperparams.
+
+```python
+def CLAS2(logits, labels, lengths, device, y_bin=None):
+    # ... sigmoid + vid_label derivation ...
+    for i in range(logits.shape[0]):
+        L = int(lengths[i])
+        v = probs[i, :L]
+        if y_bin is not None and vid_label[i] > 0.5:  # anomaly
+            inside = y_bin[i, :L] > 0.5
+            n_inside = int(inside.sum())
+            if n_inside > 0:
+                pool = v[inside]
+                k = max(1, n_inside // 16 + 1)   # same 6% density
+            else:
+                pool, k = v, max(1, L // 16 + 1)  # fallback
+        else:
+            pool, k = v, max(1, L // 16 + 1)  # normal: unchanged
+        tmp, _ = torch.topk(pool, k=min(k, pool.shape[0]), largest=True)
+        instance_logits = torch.cat([instance_logits, tmp.mean().view(1)], dim=0)
+    return F.binary_cross_entropy(instance_logits, vid_label)
+```
+
+**Training log (trích)**:
+
+| Ep | bce_v | nce | dice | ctr | bnd | mAP_abn |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 0.310 | 1.644 | 0.000 | 0.000 | 0.000 | 15.26 |
+| 8 | 0.043 | 0.249 | 0.537 | 0.170 | 0.543 | 21.72 |
+| 13 | 0.038 | 0.216 | 0.519 | **0.134** | 0.543 | 23.92 |
+| 20 | 0.038 | 0.210 | 0.515 | **0.127** | 0.543 | **24.06** |
+
+`bce_v` cao hơn Exp 12 (0.038 vs 0.022) vì pool restricted → không cheat bằng frame outlier. `ctr` 0.127 vs Exp 12 0.144 → gap inside-outside rộng hơn (0.173 vs 0.156). Mechanism has signal.
+
+**Kết quả (2026-04-18)**: **Mixed — mechanism PASS, primary perf FAIL**.
+
+| Metric | Exp 12 + top_2 | Exp 18 + top_2 | Δ | Verdict |
+|---|---:|---:|---:|---|
+| **mAP_abn** | **24.86** | **24.06** | **−0.80** | ❌ Regression |
+| @0.1 | 45.92 | 44.97 | −0.95 | |
+| @0.2 | 33.59 | 33.54 | −0.05 | |
+| @0.3 | 23.94 | **21.84** | **−2.10** | Worst bin |
+| @0.4 | 12.93 | 12.75 | −0.18 | |
+| @0.5 | 7.93 | 7.18 | −0.75 | |
+| AUC | 0.8557 | 0.8635 | +0.008 | |
+
+**Diag trên Exp 18** (`docs/diag/exp18.json`):
+
+| Metric | Exp 12 | Exp 18 | Δ | Verdict |
+|---|---:|---:|---:|---|
+| **peak_in_gt_ratio** | 0.321 | **0.464** | **+0.143** | ✅ ≥ 0.45 **PASS** |
+| peak_in_middle_ratio | 0.157 | 0.243 | +0.086 | Peak vào giữa GT |
+| coverage_inside | 0.958 | 0.978 | +0.020 | Better |
+| spillover_window | 0.824 | 0.802 | −0.022 | Better |
+| boundary_sharp | 0.008 | 0.007 | −0.001 | Architecture-bounded |
+| **over_coverage** | 2.497 | **3.045** | **+0.548** | ⚠️ **WORSE (root cause)** |
+| median IoU | 0.275 | 0.279 | +0.004 | Tied |
+
+**Root cause trade-off diagnosed**:
+- b3 mechanism forced peak vào GT (primary hypothesis test PASS: 32% → 46%)
+- **Nhưng mất outside suppression**: MIL top-k pool toàn video hàm ý ngầm suppress outside (frame outside được rank → không được chọn → gradient đẩy down). Restrict pool về inside-GT = xóa pressure này.
+- `over_coverage` 2.50 → 3.05 (+22%) → proposals bloat rộng quanh peak đúng chỗ
+- Adaptive threshold `max − 0.6·(max−min)`: với `max` cao hơn tại peak, vùng prob ≥ threshold nở rộng → proposal bloat
+- Hit mAP @0.3 mạnh nhất (−2.10): vừa đủ lệch để mất IoU 0.3 match
+
+**Insight mới**: MIL top-k pool NOT ONLY chọn peak positive — nó CÒN provide **implicit outside suppression** qua ranking. Mất chức năng thứ hai khi restrict pool.
+
+#### Exp 19 — b3 + explicit outside-BCE reweight (Option B)
+
+**Motivation**: Exp 18 mechanism test passed nhưng mAP regress vì lost outside pressure. Restore pressure bằng **explicit** reweight outside-GT BCE trên anomaly videos (compensate cho MIL pool không còn đụng outside).
+
+**Design**: Modify `frame_bce_loss` để thêm weight α trên frames thỏa (is_anomaly AND target==0). Normal videos unchanged. Inside-GT frames unchanged. Giữ Exp 18's CLAS2 GT-pool.
+
+```python
+def frame_bce_loss(logits, target, mask, pos_weight,
+                   outside_weight=1.0, is_anomaly=None):
+    if outside_weight <= 1.0 or is_anomaly is None:
+        # Exp 12/18 path — unchanged
+        ...
+    bce = F.binary_cross_entropy_with_logits(logits, target, ...,
+                                              reduction='none')
+    outside = 1.0 - target                                   # [B, T]
+    anom = is_anomaly.float().unsqueeze(1)                   # [B, 1]
+    w = 1.0 + (outside_weight - 1.0) * anom * outside        # [B, T]
+    return (bce * w * mask_f).sum() / (w * mask_f).sum().clamp_min(1.0)
+```
+
+**Hyperparameter**: `--outside-weight 2.0` (safe starting point; α=3 nếu 2 không đủ).
+
+**Targets (binary pass/fail)**:
+- `over_coverage ≤ 2.5` (drop từ 3.05 Exp 18 về Exp 12 level ~2.5)
+- `peak_in_gt_ratio ≥ 0.45` (giữ b3 mechanism win)
+- `mAP_abn + top_2 > 24.86` (beat Exp 12+top_2)
+- `AUC ≥ 0.86`
+
+**Failure modes**:
+- over_coverage vẫn > 2.8 → α=2 không đủ, thử α=3
+- peak_in_gt drop < 0.40 → outside reweight overshooted, hurt inside signal. α = 1.5
+- mAP tụt thêm → interaction không expected, revert
+
+**Training command**:
+```bash
+python -u src/train.py \
+    --focal-gamma 0 --lambda2 1.0 \
+    --lambda-contrast 1.0 --contrast-margin 0.3 \
+    --pos-weight 1.0 --lambda-boundary 1.5 --boundary-pos-weight 10.0 \
+    --outside-weight 2.0 \
+    --inference threshold --max-epoch 20 --scheduler-milestones 6 11 \
+    --model-path final_model/model_exp19_outw2.pth \
+    --checkpoint-path final_model/ckpt_exp19_outw2.pth \
+    | tee logs/train_exp19_outw2.log
+```
+
 | Exp | Phương pháp | mAP | AUC | Kết luận |
 |---|---|---:|---:|---|
 | Base | VadCLIP gốc | **16.06** | 0.8736 | — |

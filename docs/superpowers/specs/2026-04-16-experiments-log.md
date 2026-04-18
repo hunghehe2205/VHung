@@ -484,9 +484,42 @@ python -u src/train.py \
     | tee logs/train_exp17_bsharp.log
 ```
 
----
+**Kết quả (2026-04-18)**: **FAIL hoàn toàn** — mAP_abn **19.91** (ep19), Δ=**−4.95** vs Exp 12 (24.86).
 
-## 4. Tóm tắt
+Training log (trích epoch đại diện):
+
+| Ep | lam | bce_v | nce | cts | fbce | p3 | ctr | bnd | mAP_abn |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 4 | (0.1, 0) | 0.051 | 0.518 | 0.010 | 0.830 | 0.000 | 0.000 | 0.600 | 18.03 |
+| 7 | (0.1, 1) | 0.024 | 0.168 | 0.003 | 0.666 | 0.560 | **0.483** | 0.543 | 18.08 |
+| 12 | (0.1, 1) | 0.020 | 0.130 | 0.002 | 0.625 | 0.540 | **0.479** | 0.542 | 19.49 |
+| 19 | (0.1, 1) | 0.020 | 0.124 | 0.002 | 0.616 | 0.538 | **0.479** | 0.542 | **19.91** |
+
+**Root cause — `ctr` loss FROZEN**: Từ ep7 (kích hoạt) tới ep20, `ctr` chỉ giảm 0.483 → 0.479 (Δ = −0.004). Không optimize được.
+
+- `margin = 0.5`, avg `|Δprob|` tại GT transitions ≈ 0.021 → loss ≈ 0.5 − 0.021 = 0.479 (khớp chính xác).
+- Gradient quá yếu: chỉ ~2 frame active per anomaly video (vs Dice acting on hundreds of frames) → contribution nhỏ trong tổng loss.
+- Architecturally smoothed: `attn_window=8` + linear upsample ×16 làm output mượt theo thiết kế. Yêu cầu `|Δprob| ≥ 0.5` trong 1 snippet step là không đạt được.
+
+**Diag trên Exp 17 checkpoint** (`docs/diag/exp17.json`):
+
+| Metric | Exp 12 | Exp 17 | Δ |
+|---|---:|---:|---:|
+| peak_in_gt_ratio | 0.321 | 0.329 | +0.008 |
+| coverage_inside | 0.958 | 0.924 | −0.034 |
+| spillover_window | 0.824 | 0.822 | −0.002 |
+| **boundary_sharp** | **0.008** | **0.007** | **−0.001** ⚠️ |
+| over_coverage | 2.497 | 2.512 | +0.015 |
+| median IoU | 0.275 | 0.249 | −0.026 |
+
+Metric mục tiêu (`boundary_sharp`) **không chuyển động** (0.008 → 0.007). Tất cả metric còn lại đứng yên hoặc xấu đi nhẹ. IoU bins cao bị collapse: @0.5 3.59 vs Exp 12 6.46.
+
+**Lessons learned từ Exp 16 + 17 (2 REPLACE consecutive FAIL)**:
+
+1. **Adaptive threshold `max − 0.6·(max−min)` auto-normalize uniform prob shifts** → bất kỳ loss nào shift prob đồng đều (Tversky shrink, boundary_sharp nếu có work) không tác động lên proposals.
+2. **`over_coverage` và `boundary_sharp` không độc lập** — cùng xuất phát từ smoothing architecture. Loss-surgery một chiều không fix được.
+3. **Exp 12's 7 losses hoạt động theo interplay**: thay 1 → cân bằng vỡ. Mean-contrast giữ `coverage_inside=0.958`; bỏ nó trong Exp 17 thấy drop ngay về 0.924 dù boundary_sharp thay thế chả làm gì.
+4. **Single-frame sharpness có thể không reachable qua loss alone** tại `attn_window=8 + linear upsample ×16`. Cần hoặc (a) đổi architecture (attn_window=1?), hoặc (b) sharpen ở inference (γ-power, proposal trim), hoặc (c) dạy sharpness qua signal khác (boundary-adjacent fbce reweighting trên snippet nearby GT edge — tác động trên hàng trăm frame thay vì ~2).
 
 | Exp | Phương pháp | mAP | AUC | Kết luận |
 |---|---|---:|---:|---|
@@ -509,7 +542,7 @@ python -u src/train.py \
 | A1 | `--lambda-nce 0` (drop CLASM) | 21.96 | 0.8543 | FAIL — Δ=−2.10 vs Exp 12, nce load-bearing |
 | A2 | `--lambda-cts 0` (drop text div) | 22.77 | 0.8467 | FAIL — Δ=−1.21 vs Exp 12, cts load-bearing |
 | 16 | REPLACE Dice → Tversky(0.7, 0.3) | 20.86 | 0.8545 | FAIL — Δ=−3.20, over-shrink (coverage 0.958→0.728) |
-| 17 | REPLACE contrast → boundary_sharp | TBD | TBD | Targeting boundary_sharp=0.008 flat → ≥0.1 |
+| 17 | REPLACE contrast → boundary_sharp | 19.91 | 0.8551 | FAIL — Δ=−4.95, loss frozen ở 0.479, boundary_sharp metric không đổi (0.008→0.007) |
 | **Exp12+top2** | **inference: `top_2` cap on Exp 12** | **24.86** | 0.8557 | **Best overall. No retrain (real test.py)** |
 
 \* _Eval cũ (gtpos=306), chưa re-eval_
@@ -538,14 +571,23 @@ python -u src/train.py \
 9. **Localization ≠ classification** (diagnostic 2026-04-17): AUC 0.8557 tốt, nhưng **67.9% peak ngoài GT**, pred coverage 2.22× GT width. Model học "có anomaly hay không" rất tốt nhưng "ở đâu" còn yếu.
 10. **Top-K cap tại inference**: `top_2` = +0.79 mAP zero-cost. Loại low-rank multi-peak FPs khi GT median 14.3% → most videos ≤ 2 events thực.
 
-### Bottleneck hiện tại
+### Bottleneck hiện tại (cập nhật 2026-04-18)
 
-- **Best overall = Exp12+top_2** = 24.77 mAP (inference-only, no retrain).
-- **Core model** (Exp 12) saturate — thêm epochs / simplify architecture đều không giúp.
-- **Wrong-location problem** chưa addressed: 67.9% peaks ngoài GT. Contrast loss margin=0.3 đủ cho classification nhưng không force peak-at-location.
-- **Next ideas (candidates)**:
-  - Retrain với peak-aware contrast: `max_inside > max_outside + margin` thay `mean_inside > mean_outside + margin`.
-  - Suppression loss: penalty trực tiếp cho `mean(prob[outside])` trên anomaly videos.
-  - Stronger contrast margin 0.3 → 0.5 hoặc 0.7.
-  - Top-K MIL chỉ trên GT frames (anomaly videos) thay vì toàn video → ép peak trong GT.
+- **Best overall = Exp12+top_2** = 24.86 mAP (inference-only, no retrain).
+- **Core model (Exp 12) saturate**. Phase A ablation (A1, A2) confirm no dead weight. Phase B REPLACE (16, 17) đều FAIL.
+- **Bottleneck = interplay giữa smoothing architecture + adaptive threshold**:
+  - `attn_window=8` + linear upsample ×16 → output prob smoothed theo thiết kế
+  - Adaptive threshold `max − 0.6·(max−min)` → auto-normalize uniform prob shifts
+  - Kết quả: loss-surgery đơn lẻ trên Dice/contrast không xuyên thủng được
+- **Localization failure mode (diag confirmed)**:
+  - `boundary_sharp = 0.008` ở cả baseline và Exp 12 (flat edges)
+  - `over_coverage = 2.5×` persistent
+  - `peak_in_gt = 32%` (peak có thể nằm ngoài dù coverage_inside=0.96 — prob uniform)
+- **Next directions (candidates, chưa validate)**:
+  - **Inference-side (cheap, no retrain)**: γ-sharpen `prob^γ` trước threshold; proposal refinement (trim top_2 proposal về frames above `local_max × α`); threshold constant sweep 0.4/0.5/0.7
+  - **Training-side, respect interplay**:
+    - Modify mean-contrast margin 0.3 → 0.5 (strengthen, không replace)
+    - Boundary-adjacent fbce reweighting — weight BCE cao hơn ở frames gần GT edge (tác động hàng trăm frame, không chỉ ~2)
+    - CLAS2 top-k-from-GT — thay top-k toàn video bằng top-k-inside-GT cho MIL positive pool trên anomaly videos
+  - **Architectural**: giảm `attn_window` từ 8 xuống 4 hoặc 2 để giảm smoothing (nguy cơ: mất temporal context cần cho classification)
 - **Rejected**: TTA 10-crop — không reflect deployment reality.

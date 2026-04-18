@@ -20,10 +20,6 @@ parser.add_argument('--batch-size', default=64, type=int)
 parser.add_argument('--lr', default=2e-5, type=float)
 parser.add_argument('--scheduler-rate', default=0.1, type=float)
 parser.add_argument('--scheduler-milestones', default=[4, 8], nargs='+', type=int)
-parser.add_argument('--grad-clip', default=0.0, type=float,
-                    help='Max grad norm for clipping (0 = off)')
-parser.add_argument('--head-lr', default=2e-4, type=float,
-                    help='LR for boundary heads (separate optimizer, no decay)')
 
 # Paths
 parser.add_argument('--model-path', default='final_model/model_ucf.pth')
@@ -51,27 +47,12 @@ parser.add_argument('--lambda-cts', default=1.0, type=float,
                     help='Weight for text-feature divergence loss. 0 disables.')
 parser.add_argument('--focal-gamma', default=2.0, type=float,
                     help='0 = plain BCE, >0 = focal BCE with that gamma')
-parser.add_argument('--phase3-loss', default='tv',
-                    choices=['tv', 'dice', 'tversky'],
-                    help='Phase 3 localization loss: tv, dice, or tversky')
-parser.add_argument('--tversky-alpha', default=0.7, type=float,
-                    help='Tversky FP penalty (higher α → penalize over-pred more). '
-                         'α=β=0.5 equals symmetric Dice.')
-parser.add_argument('--tversky-beta', default=0.3, type=float,
-                    help='Tversky FN penalty.')
 parser.add_argument('--lambda-contrast', default=0.0, type=float,
                     help='Weight for within-video contrast loss (Phase 3). 0 = off')
 parser.add_argument('--contrast-margin', default=0.3, type=float,
-                    help='Margin for contrast loss (shared by mean and boundary_sharp)')
-parser.add_argument('--contrast-type', default='mean',
-                    choices=['mean', 'boundary_sharp'],
-                    help='mean = global inside/outside mean gap (Exp 12). '
-                         'boundary_sharp = local |Δprob| at GT transitions '
-                         '(Exp 17 target: boundary_sharp diag metric).')
+                    help='Margin for within-video contrast loss')
 parser.add_argument('--lambda-boundary', default=0.5, type=float,
                     help='Weight for start/end boundary BCE (Phase 2+). 0 = off')
-parser.add_argument('--boundary-sigma', default=1.0, type=float,
-                    help='Gaussian sigma for boundary target smoothing (snippets)')
 parser.add_argument('--boundary-pos-weight', default=10.0, type=float,
                     help='pos_weight for boundary BCE (positives are rare)')
 parser.add_argument('--inference', default='threshold',

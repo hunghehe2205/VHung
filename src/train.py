@@ -30,45 +30,37 @@ def CLASM(logits, labels, lengths, device):
     return milloss
 
 
-def CLAS2(logits, labels, lengths, device):
+def CLAS2(logits, labels, lengths, device, y_bin=None):
+    """Video-level MIL BCE. Top-k pool per video, mean → BCE vs video label.
+
+    Exp 18 change: if `y_bin` (frame-level GT) provided, anomaly videos pool
+    top-k ONLY from inside-GT frames — forces MIL gradient to concentrate
+    prob at correct location (attacks peak_in_gt=0.32 failure mode). Normal
+    videos unchanged (pool from whole video). Fallback to whole-video pool
+    if anomaly has 0 inside-GT frames (shouldn't happen for anomaly).
+    """
     instance_logits = torch.zeros(0).to(device)
-    labels = 1 - labels[:, 0].reshape(labels.shape[0])
-    labels = labels.to(device)
-    logits = torch.sigmoid(logits).reshape(logits.shape[0], logits.shape[1])
+    vid_label = 1 - labels[:, 0].reshape(labels.shape[0])
+    vid_label = vid_label.to(device)
+    probs = torch.sigmoid(logits).reshape(logits.shape[0], logits.shape[1])
 
     for i in range(logits.shape[0]):
-        tmp, _ = torch.topk(logits[i, 0:lengths[i]], k=int(lengths[i] / 16 + 1), largest=True)
-        tmp = torch.mean(tmp).view(1)
-        instance_logits = torch.cat([instance_logits, tmp], dim=0)
+        L = int(lengths[i])
+        v = probs[i, :L]
+        if y_bin is not None and vid_label[i] > 0.5:
+            inside = y_bin[i, :L] > 0.5
+            n_inside = int(inside.sum())
+            if n_inside > 0:
+                pool = v[inside]
+                k = max(1, n_inside // 16 + 1)
+            else:
+                pool, k = v, max(1, L // 16 + 1)
+        else:
+            pool, k = v, max(1, L // 16 + 1)
+        tmp, _ = torch.topk(pool, k=min(k, pool.shape[0]), largest=True)
+        instance_logits = torch.cat([instance_logits, tmp.mean().view(1)], dim=0)
 
-    clsloss = F.binary_cross_entropy(instance_logits, labels)
-    return clsloss
-
-
-def soft_iou_loss(probs, target, mask, eps=1e-6):
-    """Sequence-level soft temporal IoU loss.
-    probs: [B, T] in [0,1] — sigmoid(logits1).
-    target: [B, T] in {0,1} — y_bin.
-    mask: [B, T] bool — True for valid frames.
-    Returns scalar mean across batch.
-    """
-    mask_f = mask.float()
-    probs = probs * mask_f
-    target = target * mask_f
-    inter = (probs * target).sum(dim=-1)
-    union = probs.sum(dim=-1) + target.sum(dim=-1) - inter
-    iou = (inter + eps) / (union + eps)
-    return (1.0 - iou).mean()
-
-
-def tv_smoothness_loss(probs, mask):
-    """Total-variation temporal smoothness on [B, T] probs.
-    Penalizes |p_t - p_{t-1}| over frames where both t and t-1 are valid.
-    Returns scalar = mean per-transition absolute difference.
-    """
-    diffs = (probs[:, 1:] - probs[:, :-1]).abs()
-    valid = (mask[:, 1:] & mask[:, :-1]).float()
-    return (diffs * valid).sum() / valid.sum().clamp_min(1.0)
+    return F.binary_cross_entropy(instance_logits, vid_label)
 
 
 def dice_loss_anomaly(probs, target, mask, eps=1.0):
@@ -86,23 +78,6 @@ def dice_loss_anomaly(probs, target, mask, eps=1.0):
     return ((1.0 - dice) * has_pos).sum() / has_pos.sum().clamp_min(1.0)
 
 
-def tversky_loss_anomaly(probs, target, mask, alpha=0.7, beta=0.3, eps=1.0):
-    """Asymmetric Dice: TP / (TP + α·FP + β·FN). α>β penalizes over-prediction
-    (FP) more than under-prediction (FN). Replaces symmetric Dice to address
-    the diagnosed over_coverage_ratio=2.5× and spillover_window=0.82 in Exp 12.
-    Anomaly-only gating same as dice_loss_anomaly.
-    """
-    mask_f = mask.float()
-    p = probs * mask_f
-    y = target * mask_f
-    tp = (p * y).sum(-1)
-    fp = (p * (1.0 - y)).sum(-1)
-    fn = ((1.0 - p) * y).sum(-1)
-    tversky = (tp + eps) / (tp + alpha * fp + beta * fn + eps)
-    has_pos = (y.sum(-1) > 0).float()
-    return ((1.0 - tversky) * has_pos).sum() / has_pos.sum().clamp_min(1.0)
-
-
 def within_video_contrast_loss(probs, target, mask, margin=0.3):
     """Per anomaly video: mean prob inside GT must exceed mean prob outside
     by at least `margin`. Forces peak AT the correct location rather than
@@ -116,25 +91,6 @@ def within_video_contrast_loss(probs, target, mask, margin=0.3):
     outside_mean = (probs * outside).sum(-1) / outside.sum(-1).clamp_min(1.0)
     gap_loss = F.relu(margin - (inside_mean - outside_mean))
     return (gap_loss * has_inside).sum() / has_inside.sum().clamp_min(1.0)
-
-
-def boundary_sharp_loss(probs, target, mask, margin=0.5):
-    """Local separation AT GT boundaries. Targets boundary_sharpness=0.008
-    diagnostic (Exp 12): at every frame where target transitions (start or
-    end of GT), enforce |Δprob| >= margin. Anomaly-only (no transitions in
-    normal videos → weight is 0).
-
-    Different from within_video_contrast_loss (global mean separation):
-    this loss does NOT care about uniform inside-high outside-low, only
-    about producing a SHARP edge at the right frame. Complements Dice
-    (which measures area overlap, not edge steepness).
-    """
-    mask_diff = (mask[:, 1:] & mask[:, :-1]).float()                    # [B, T-1]
-    target_diff = (target[:, 1:] - target[:, :-1]).abs()                # {0, 1}
-    prob_diff = (probs[:, 1:] - probs[:, :-1]).abs()
-    weight = mask_diff * target_diff                                    # 1 only at transitions
-    gap = F.relu(margin - prob_diff)
-    return (gap * weight).sum() / weight.sum().clamp_min(1.0)
 
 
 def frame_bce_loss(logits, target, mask, pos_weight):
@@ -225,7 +181,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         lam1, lam2 = get_lambda(e, args.phase1_epochs, args.phase2_epochs,
                                 args.lambda1, args.lambda2)
         model.train()
-        sum_bce_v = sum_nce = sum_cts = sum_fbce = sum_p3 = sum_ctr = 0.0
+        sum_bce_v = sum_nce = sum_cts = sum_fbce = sum_dice = sum_ctr = 0.0
         sum_bnd = 0.0
         n_iters = min(len(normal_loader), len(anomaly_loader))
         t_start = time.time()
@@ -251,8 +207,9 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
 
             text_features, logits1, logits2, start_logits, end_logits = model(visual, None, prompt_text, lengths)
 
-            # Original MIL losses (preserved)
-            loss_bce_v = CLAS2(logits1, text_labels_t, lengths, device)
+            # Original MIL losses (preserved). CLAS2 pools top-k from inside-GT
+            # for anomaly videos (Exp 18: attacks peak_in_gt=0.32 bottleneck).
+            loss_bce_v = CLAS2(logits1, text_labels_t, lengths, device, y_bin=y_bin)
             loss_nce   = CLASM(logits2, text_labels_t, lengths, device)
 
             # Text feature divergence (unchanged structure)
@@ -283,24 +240,13 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                 mask_T2 = (torch.arange(probs.shape[1], device=device)
                            .unsqueeze(0) < lengths.unsqueeze(1))
             if lam2 > 0:
-                if args.phase3_loss == 'dice':
-                    loss_p3 = dice_loss_anomaly(probs, y_bin, mask_T2)
-                elif args.phase3_loss == 'tversky':
-                    loss_p3 = tversky_loss_anomaly(
-                        probs, y_bin, mask_T2,
-                        alpha=args.tversky_alpha, beta=args.tversky_beta)
-                else:
-                    loss_p3 = tv_smoothness_loss(probs, mask_T2)
+                loss_dice = dice_loss_anomaly(probs, y_bin, mask_T2)
             else:
-                loss_p3 = torch.zeros(1, device=device)
+                loss_dice = torch.zeros(1, device=device)
 
             if lam2 > 0 and args.lambda_contrast > 0:
-                if args.contrast_type == 'boundary_sharp':
-                    loss_ctr = boundary_sharp_loss(
-                        probs, y_bin, mask_T2, margin=args.contrast_margin)
-                else:
-                    loss_ctr = within_video_contrast_loss(
-                        probs, y_bin, mask_T2, margin=args.contrast_margin)
+                loss_ctr = within_video_contrast_loss(
+                    probs, y_bin, mask_T2, margin=args.contrast_margin)
             else:
                 loss_ctr = torch.zeros(1, device=device)
 
@@ -322,7 +268,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             loss = (loss_bce_v
                     + args.lambda_nce * loss_nce
                     + args.lambda_cts * loss_cts
-                    + lam1 * loss_fbce + lam2 * loss_p3
+                    + lam1 * loss_fbce + lam2 * loss_dice
                     + args.lambda_contrast * loss_ctr
                     + bnd_gate * args.lambda_boundary * loss_bnd)
 
@@ -334,22 +280,23 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             sum_nce   += float(loss_nce)
             sum_cts   += float(loss_cts)
             sum_fbce  += float(loss_fbce)
-            sum_p3    += float(loss_p3)
+            sum_dice  += float(loss_dice)
             sum_ctr   += float(loss_ctr)
-            sum_bnd += float(loss_bnd)
+            sum_bnd   += float(loss_bnd)
             pbar.set_postfix(bce_v=sum_bce_v / (i + 1),
                              nce=sum_nce / (i + 1),
                              cts=sum_cts / (i + 1),
                              fbce=sum_fbce / (i + 1),
-                             p3=sum_p3 / (i + 1),
-                             ctr=sum_ctr / (i + 1))
+                             dice=sum_dice / (i + 1),
+                             ctr=sum_ctr / (i + 1),
+                             bnd=sum_bnd / (i + 1))
 
         train_secs = time.time() - t_start
         avg_bce_v = sum_bce_v / n_iters
         avg_nce = sum_nce / n_iters
         avg_cts = sum_cts / n_iters
         avg_fbce = sum_fbce / n_iters
-        avg_p3 = sum_p3 / n_iters
+        avg_dice = sum_dice / n_iters
         avg_ctr = sum_ctr / n_iters
         avg_bnd = sum_bnd / n_iters
 
@@ -375,7 +322,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         print(f'[ep {e+1:2d}/{args.max_epoch} {train_secs:.0f}s] '
               f'lam=({lam1},{lam2}) | '
               f'bce_v={avg_bce_v:.3f} nce={avg_nce:.3f} cts={avg_cts:.4f} '
-              f'fbce={avg_fbce:.3f} p3={avg_p3:.3f} ctr={avg_ctr:.3f} '
+              f'fbce={avg_fbce:.3f} dice={avg_dice:.3f} ctr={avg_ctr:.3f} '
               f'bnd={avg_bnd:.3f} | '
               f'AUC={AUC:.4f} mAP_abn={avg_mAP_abn:.2f} [{abn_str}]{bsn_str}{tag}',
               flush=True)

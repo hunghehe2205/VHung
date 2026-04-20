@@ -1,6 +1,5 @@
 from collections import OrderedDict
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -98,9 +97,21 @@ class CLIPVAD(nn.Module):
             ("c_proj", nn.Linear(visual_width * 4, visual_width))
         ]))
         self.classifier = nn.Linear(visual_width, 1)
-        # Boundary cls heads — gradient flows to backbone (auxiliary regularizer)
-        self.start_head = nn.Linear(visual_width, 1)
-        self.end_head = nn.Linear(visual_width, 1)
+
+        # TCN head (hướng A1): branches from x_pre (post-Transformer, pre-GCN).
+        # Dilations 1,2,4 on a 512→128 stem give a receptive field of 15 snippets.
+        self.tcn = nn.Sequential(
+            nn.Conv1d(visual_width, 128, kernel_size=3, dilation=1, padding=1),
+            nn.GELU(),
+            nn.Dropout(0.3),
+            nn.Conv1d(128, 128, kernel_size=3, dilation=2, padding=2),
+            nn.GELU(),
+            nn.Dropout(0.3),
+            nn.Conv1d(128, 128, kernel_size=3, dilation=4, padding=4),
+            nn.GELU(),
+            nn.Dropout(0.3),
+            nn.Conv1d(128, 1, kernel_size=1),
+        )
 
         self.clipmodel, _ = clip.load("ViT-B/16", device)
         for clip_param in self.clipmodel.parameters():
@@ -186,10 +197,9 @@ class CLIPVAD(nn.Module):
     def forward(self, visual, padding_mask, text, lengths):
         visual_features, x_pre = self.encode_video(visual, padding_mask, lengths)
         logits1 = self.classifier(visual_features + self.mlp2(visual_features))
-        # Boundary cls heads: gradient flows to backbone (auxiliary regularizer)
-        x_diff = F.pad(x_pre[:, 1:] - x_pre[:, :-1], (0, 0, 0, 1))  # [B, T, D]
-        start_logits = self.start_head(x_pre + x_diff)    # [B, T, 1]
-        end_logits = self.end_head(x_pre - x_diff)          # [B, T, 1]
+
+        # TCN head: x_pre [B, T, D] -> conv over time -> [B, T, 1]
+        tcn_logits = self.tcn(x_pre.transpose(1, 2)).transpose(1, 2)
 
         text_features_ori = self.encode_textprompt(text)
 
@@ -208,4 +218,4 @@ class CLIPVAD(nn.Module):
         text_features_norm = text_features_norm.permute(0, 2, 1)
         logits2 = visual_features_norm @ text_features_norm.type(visual_features_norm.dtype) / 0.07
 
-        return text_features_ori, logits1, logits2, start_logits, end_logits
+        return text_features_ori, logits1, logits2, tcn_logits

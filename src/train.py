@@ -1,19 +1,19 @@
 import os
+import random
 import sys
 import time
-import torch
-from torch import nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
-from torch.optim.lr_scheduler import MultiStepLR
+
 import numpy as np
-import random
+import torch
+import torch.nn.functional as F
+from torch.optim.lr_scheduler import MultiStepLR
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from model import CLIPVAD
-from test import test, LABEL_MAP
+from test import LABEL_MAP, test
 from utils.dataset import UCFDataset
-from utils.tools import get_prompt_text, get_batch_label
+from utils.tools import get_batch_label, get_prompt_text
 import option
 
 
@@ -21,29 +21,22 @@ def CLASM(logits, labels, lengths, device):
     instance_logits = torch.zeros(0).to(device)
     labels = labels / torch.sum(labels, dim=1, keepdim=True)
     labels = labels.to(device)
-
     for i in range(logits.shape[0]):
-        tmp, _ = torch.topk(logits[i, 0:lengths[i]], k=int(lengths[i] / 16 + 1), largest=True, dim=0)
-        instance_logits = torch.cat([instance_logits, torch.mean(tmp, 0, keepdim=True)], dim=0)
-
-    milloss = -torch.mean(torch.sum(labels * F.log_softmax(instance_logits, dim=1), dim=1), dim=0)
-    return milloss
+        tmp, _ = torch.topk(
+            logits[i, 0:lengths[i]],
+            k=int(lengths[i] / 16 + 1), largest=True, dim=0)
+        instance_logits = torch.cat(
+            [instance_logits, torch.mean(tmp, 0, keepdim=True)], dim=0)
+    return -torch.mean(
+        torch.sum(labels * F.log_softmax(instance_logits, dim=1), dim=1), dim=0)
 
 
 def CLAS2(logits, labels, lengths, device, y_bin=None):
-    """Video-level MIL BCE. Top-k pool per video, mean → BCE vs video label.
-
-    Exp 18 change: if `y_bin` (frame-level GT) provided, anomaly videos pool
-    top-k ONLY from inside-GT frames — forces MIL gradient to concentrate
-    prob at correct location (attacks peak_in_gt=0.32 failure mode). Normal
-    videos unchanged (pool from whole video). Fallback to whole-video pool
-    if anomaly has 0 inside-GT frames (shouldn't happen for anomaly).
-    """
+    """Video-level MIL BCE on logits1 with Exp 18 top-k inside-GT for anomaly."""
     instance_logits = torch.zeros(0).to(device)
     vid_label = 1 - labels[:, 0].reshape(labels.shape[0])
     vid_label = vid_label.to(device)
     probs = torch.sigmoid(logits).reshape(logits.shape[0], logits.shape[1])
-
     for i in range(logits.shape[0]):
         L = int(lengths[i])
         v = probs[i, :L]
@@ -51,23 +44,26 @@ def CLAS2(logits, labels, lengths, device, y_bin=None):
             inside = y_bin[i, :L] > 0.5
             n_inside = int(inside.sum())
             if n_inside > 0:
-                pool = v[inside]
-                k = max(1, n_inside // 16 + 1)
+                pool, k = v[inside], max(1, n_inside // 16 + 1)
             else:
                 pool, k = v, max(1, L // 16 + 1)
         else:
             pool, k = v, max(1, L // 16 + 1)
         tmp, _ = torch.topk(pool, k=min(k, pool.shape[0]), largest=True)
         instance_logits = torch.cat([instance_logits, tmp.mean().view(1)], dim=0)
-
     return F.binary_cross_entropy(instance_logits, vid_label)
 
 
-def dice_loss_anomaly(probs, target, mask, eps=1.0):
-    """Soft Dice on [B, T] probs, reduced over anomaly videos only.
-    Normal videos (all-zero target) are skipped to avoid redundant signal
-    with BCE. eps=1 for smoothing and non-zero gradient when union small.
-    """
+def tcn_bce(logits, target, mask, pos_weight):
+    """Frame-level BCE on TCN logits [B,T] with Gaussian-smoothed target."""
+    logits_m = logits[mask]
+    target_m = target[mask]
+    return F.binary_cross_entropy_with_logits(
+        logits_m, target_m, pos_weight=pos_weight.to(logits_m.device))
+
+
+def tcn_dice(probs, target, mask, eps=1.0):
+    """Anomaly-only soft Dice on sigmoid(tcn_logits)."""
     mask_f = mask.float()
     p = probs * mask_f
     y = target * mask_f
@@ -78,11 +74,8 @@ def dice_loss_anomaly(probs, target, mask, eps=1.0):
     return ((1.0 - dice) * has_pos).sum() / has_pos.sum().clamp_min(1.0)
 
 
-def within_video_contrast_loss(probs, target, mask, margin=0.3):
-    """Per anomaly video: mean prob inside GT must exceed mean prob outside
-    by at least `margin`. Forces peak AT the correct location rather than
-    uniformly-high output. Normal videos skipped (no inside region).
-    """
+def tcn_ctr(probs, target, mask, margin=0.3):
+    """Within-video contrast on sigmoid(tcn_logits). Anomaly-only."""
     valid = mask.float()
     inside = (target > 0.5).float() * valid
     outside = (1.0 - (target > 0.5).float()) * valid
@@ -93,56 +86,26 @@ def within_video_contrast_loss(probs, target, mask, margin=0.3):
     return (gap_loss * has_inside).sum() / has_inside.sum().clamp_min(1.0)
 
 
-def frame_bce_loss(logits, target, mask, pos_weight):
-    """Frame-level binary BCE on logits1 with scalar pos_weight.
-    logits: [B, T] raw logits.
-    target: [B, T] {0,1}.
-    mask: [B, T] bool.
-    pos_weight: 1-D tensor [1].
-    """
-    logits_m = logits[mask]
-    target_m = target[mask]
-    return F.binary_cross_entropy_with_logits(
-        logits_m, target_m, pos_weight=pos_weight.to(logits_m.device))
-
-
-def focal_bce_loss(logits, target, mask, pos_weight, gamma=2.0):
-    """Focal BCE on logits1. Combines pos_weight (class balance) with
-    focal modulation (1 - p_t)^gamma to emphasize hard frames.
-    """
-    logits_m = logits[mask]
-    target_m = target[mask]
-    bce = F.binary_cross_entropy_with_logits(
-        logits_m, target_m, pos_weight=pos_weight.to(logits_m.device),
-        reduction='none')
-    p = torch.sigmoid(logits_m)
-    p_t = p * target_m + (1.0 - p) * (1.0 - target_m)
-    focal_w = (1.0 - p_t).clamp_min(1e-6) ** gamma
-    return (focal_w * bce).mean()
-
-
-def get_lambda(epoch, phase1_epochs, phase2_epochs, lambda1, lambda2):
-    """3-phase schedule for extra losses.
-    Phase 1 (epoch < phase1_epochs):  (0, 0)        — MIL-only warmup
-    Phase 2 (phase1 <= epoch < phase2): (λ1, 0)     — frame BCE + boundary only
-    Phase 3 (epoch >= phase2_epochs):   (λ1, λ2)    — add Dice + contrast
-    """
+def get_lambdas(epoch, phase1_epochs, phase2_epochs):
+    """3-phase curriculum for TCN losses.
+    P1: CLAS2+CLASM warmup; P2: +tcn_bce; P3: +tcn_dice, +tcn_ctr."""
     if epoch < phase1_epochs:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0, 1
     elif epoch < phase2_epochs:
-        return float(lambda1), 0.0
+        return 1.0, 0.0, 0.0, 2
     else:
-        return float(lambda1), float(lambda2)
+        return 1.0, 1.0, 1.0, 3
 
 
-def boundary_cls_loss(start_logits, end_logits, start_tgt, end_tgt,
-                      mask, pos_weight=10.0):
-    """BCE for start/end boundary cls. Logits [B, T, 1], targets [B, T]."""
-    pw = torch.tensor([pos_weight], device=mask.device)
-    s = start_logits.squeeze(-1)
-    e = end_logits.squeeze(-1)
-    return (F.binary_cross_entropy_with_logits(s[mask], start_tgt[mask], pos_weight=pw) +
-            F.binary_cross_entropy_with_logits(e[mask], end_tgt[mask], pos_weight=pw))
+def _split_param_groups(model, lr_backbone, lr_tcn):
+    tcn_params = [p for n, p in model.named_parameters()
+                  if n.startswith('tcn.') and p.requires_grad]
+    other_params = [p for n, p in model.named_parameters()
+                    if not n.startswith('tcn.') and p.requires_grad]
+    return [
+        {'params': other_params, 'lr': lr_backbone, 'weight_decay': 0.0},
+        {'params': tcn_params, 'lr': lr_tcn, 'weight_decay': 0.0},
+    ]
 
 
 def train(model, normal_loader, anomaly_loader, testloader, args, label_map, device):
@@ -151,181 +114,164 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
     gtsegments = np.load(args.gt_segment_path, allow_pickle=True)
     gtlabels = np.load(args.gt_label_path, allow_pickle=True)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.AdamW(_split_param_groups(model, args.lr, args.lr_tcn))
     scheduler = MultiStepLR(optimizer, args.scheduler_milestones, args.scheduler_rate)
     prompt_text = get_prompt_text(label_map)
 
-    # pos_weight scalar: --pos-weight overrides --pos-weight-path (legacy npy)
-    if args.pos_weight is not None:
-        pos_weight_bin = torch.tensor([args.pos_weight], dtype=torch.float32,
-                                      device=device)
-    else:
-        pos_weight_bin = torch.tensor(
-            np.load(args.pos_weight_path).astype(np.float32), device=device)
+    pos_weight_tcn = torch.tensor([args.tcn_pos_weight],
+                                  dtype=torch.float32, device=device)
 
-    ap_best = 0.0   # best avg_mAP (class-agnostic)
+    ap_best = 0.0
     start_epoch = 0
-
     if args.use_checkpoint:
-        checkpoint = torch.load(args.checkpoint_path, weights_only=False,
-                                map_location=device)
-        model.load_state_dict(checkpoint['model_state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        start_epoch = checkpoint['epoch']
-        ap_best = checkpoint['ap']
-        print('checkpoint info: epoch', start_epoch + 1, 'avg_mAP', ap_best)
+        ckpt = torch.load(args.checkpoint_path, weights_only=False, map_location=device)
+        model.load_state_dict(ckpt['model_state_dict'])
+        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+        start_epoch = ckpt['epoch']
+        ap_best = ckpt['ap']
 
     os.makedirs('final_model', exist_ok=True)
 
+    prev_total = None
     for e in range(start_epoch, args.max_epoch):
-        lam1, lam2 = get_lambda(e, args.phase1_epochs, args.phase2_epochs,
-                                args.lambda1, args.lambda2)
+        lam_bce, lam_dice, lam_ctr, phase = get_lambdas(
+            e, args.phase1_epochs, args.phase2_epochs)
+
+        if e == args.phase1_epochs:
+            print(f'[curriculum ep {e + 1} P1->P2] activating: tcn_bce (λ=1.0)',
+                  flush=True)
+        if e == args.phase2_epochs:
+            print(f'[curriculum ep {e + 1} P2->P3] activating: '
+                  f'tcn_dice (λ=1.0), tcn_ctr (λ=1.0)', flush=True)
+
         model.train()
-        sum_bce_v = sum_nce = sum_cts = sum_fbce = sum_dice = sum_ctr = 0.0
-        sum_bnd = 0.0
+        sum_clas2 = sum_clasm = sum_cts = 0.0
+        sum_tbce = sum_tdice = sum_tctr = 0.0
         n_iters = min(len(normal_loader), len(anomaly_loader))
         t_start = time.time()
-        pbar = tqdm(range(n_iters),
-                    desc=f'Ep {e+1}/{args.max_epoch}',
+        pbar = tqdm(range(n_iters), desc=f'Ep {e + 1}/{args.max_epoch} P{phase}',
                     disable=not sys.stderr.isatty(), leave=False)
-
         normal_iter = iter(normal_loader)
         anomaly_iter = iter(anomaly_loader)
 
         for i in pbar:
-            n_feat, n_lab, n_ybin, n_len, n_bnd = next(normal_iter)
-            a_feat, a_lab, a_ybin, a_len, a_bnd = next(anomaly_iter)
+            n_feat, n_lab, n_ybin, n_ysoft, n_len = next(normal_iter)
+            a_feat, a_lab, a_ybin, a_ysoft, a_len = next(anomaly_iter)
 
             visual = torch.cat([n_feat, a_feat], dim=0).to(device)
-            y_bin = torch.cat([n_ybin, a_ybin], dim=0).to(device)        # [2B, T]
-            bnd_targets = torch.cat([n_bnd, a_bnd], dim=0).to(device)    # [2B, 4, T]
-            s_cls_tgt = bnd_targets[:, 0]  # [2B, T]
-            e_cls_tgt = bnd_targets[:, 1]
+            y_bin = torch.cat([n_ybin, a_ybin], dim=0).to(device)
+            y_soft = torch.cat([n_ysoft, a_ysoft], dim=0).to(device)
             text_labels = list(n_lab) + list(a_lab)
             lengths = torch.cat([n_len, a_len], dim=0).to(device)
-            text_labels_t = get_batch_label(text_labels, prompt_text, label_map).to(device)
+            text_labels_t = get_batch_label(
+                text_labels, prompt_text, label_map).to(device)
 
-            text_features, logits1, logits2, start_logits, end_logits = model(visual, None, prompt_text, lengths)
+            text_features, logits1, logits2, tcn_logits = model(
+                visual, None, prompt_text, lengths)
 
-            # Original MIL losses (preserved). CLAS2 pools top-k from inside-GT
-            # for anomaly videos (Exp 18: attacks peak_in_gt=0.32 bottleneck).
-            loss_bce_v = CLAS2(logits1, text_labels_t, lengths, device, y_bin=y_bin)
-            loss_nce   = CLASM(logits2, text_labels_t, lengths, device)
+            loss_clas2 = CLAS2(logits1, text_labels_t, lengths, device, y_bin=y_bin)
+            loss_clasm = CLASM(logits2, text_labels_t, lengths, device)
 
-            # Text feature divergence (unchanged structure)
-            loss_cts = torch.zeros(1).to(device)
+            loss_cts = torch.zeros(1, device=device)
             tf_n = text_features[0] / text_features[0].norm(dim=-1, keepdim=True)
             for j in range(1, text_features.shape[0]):
                 tf_a = text_features[j] / text_features[j].norm(dim=-1, keepdim=True)
-                loss_cts += torch.abs(tf_n @ tf_a)
-            loss_cts = loss_cts / 13 * 1e-1
+                loss_cts = loss_cts + torch.abs(tf_n @ tf_a)
+            loss_cts = loss_cts / 13 * args.lambda_cts
 
-            # New losses (phase-gated)
-            if lam1 > 0:
-                logits1_2d = logits1.squeeze(-1)                          # [2B, T]
-                mask_T = (torch.arange(logits1_2d.shape[1], device=device)
-                          .unsqueeze(0) < lengths.unsqueeze(1))            # [2B, T]
-                if args.focal_gamma > 0:
-                    loss_fbce = focal_bce_loss(logits1_2d, y_bin, mask_T,
-                                               pos_weight_bin,
-                                               gamma=args.focal_gamma)
-                else:
-                    loss_fbce = frame_bce_loss(logits1_2d, y_bin, mask_T,
-                                               pos_weight_bin)
+            tcn_2d = tcn_logits.squeeze(-1)
+            mask_T = (torch.arange(tcn_2d.shape[1], device=device)
+                      .unsqueeze(0) < lengths.unsqueeze(1))
+
+            if lam_bce > 0:
+                loss_tbce = tcn_bce(tcn_2d, y_soft, mask_T, pos_weight_tcn)
             else:
-                loss_fbce = torch.zeros(1, device=device)
+                loss_tbce = torch.zeros(1, device=device)
 
-            if lam2 > 0 or args.lambda_contrast > 0:
-                probs = torch.sigmoid(logits1.squeeze(-1))
-                mask_T2 = (torch.arange(probs.shape[1], device=device)
-                           .unsqueeze(0) < lengths.unsqueeze(1))
-            if lam2 > 0:
-                loss_dice = dice_loss_anomaly(probs, y_bin, mask_T2)
+            probs = None
+            if lam_dice > 0 or lam_ctr > 0:
+                probs = torch.sigmoid(tcn_2d)
+            if lam_dice > 0:
+                loss_tdice = tcn_dice(probs, y_bin, mask_T)
             else:
-                loss_dice = torch.zeros(1, device=device)
-
-            if lam2 > 0 and args.lambda_contrast > 0:
-                loss_ctr = within_video_contrast_loss(
-                    probs, y_bin, mask_T2, margin=args.contrast_margin)
+                loss_tdice = torch.zeros(1, device=device)
+            if lam_ctr > 0:
+                loss_tctr = tcn_ctr(probs, y_bin, mask_T, margin=args.contrast_margin)
             else:
-                loss_ctr = torch.zeros(1, device=device)
+                loss_tctr = torch.zeros(1, device=device)
 
-            # Boundary loss — only on abnormal videos (second half of batch)
-            bnd_gate = 1.0 if lam1 > 0 else 0.0
-            B_half = n_feat.shape[0]  # first B_half = normal, rest = anomaly
-            if bnd_gate > 0 and args.lambda_boundary > 0:
-                if 'mask_T' not in locals():
-                    logits1_2d_ = logits1.squeeze(-1)
-                    mask_T = (torch.arange(logits1_2d_.shape[1], device=device)
-                              .unsqueeze(0) < lengths.unsqueeze(1))
-                loss_bnd = boundary_cls_loss(
-                    start_logits[B_half:], end_logits[B_half:],
-                    s_cls_tgt[B_half:], e_cls_tgt[B_half:],
-                    mask_T[B_half:], pos_weight=args.boundary_pos_weight)
-            else:
-                loss_bnd = torch.zeros(1, device=device)
-
-            loss = (loss_bce_v
-                    + args.lambda_nce * loss_nce
-                    + args.lambda_cts * loss_cts
-                    + lam1 * loss_fbce + lam2 * loss_dice
-                    + args.lambda_contrast * loss_ctr
-                    + bnd_gate * args.lambda_boundary * loss_bnd)
+            loss = (loss_clas2
+                    + args.lambda_nce * loss_clasm
+                    + loss_cts
+                    + lam_bce * loss_tbce
+                    + lam_dice * loss_tdice
+                    + lam_ctr * loss_tctr)
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-            sum_bce_v += float(loss_bce_v)
-            sum_nce   += float(loss_nce)
-            sum_cts   += float(loss_cts)
-            sum_fbce  += float(loss_fbce)
-            sum_dice  += float(loss_dice)
-            sum_ctr   += float(loss_ctr)
-            sum_bnd   += float(loss_bnd)
-            pbar.set_postfix(bce_v=sum_bce_v / (i + 1),
-                             nce=sum_nce / (i + 1),
-                             cts=sum_cts / (i + 1),
-                             fbce=sum_fbce / (i + 1),
-                             dice=sum_dice / (i + 1),
-                             ctr=sum_ctr / (i + 1),
-                             bnd=sum_bnd / (i + 1))
+            sum_clas2 += float(loss_clas2)
+            sum_clasm += float(loss_clasm)
+            sum_cts += float(loss_cts)
+            sum_tbce += float(loss_tbce)
+            sum_tdice += float(loss_tdice)
+            sum_tctr += float(loss_tctr)
+            pbar.set_postfix(CLAS2=sum_clas2 / (i + 1),
+                             CLASM=sum_clasm / (i + 1),
+                             tbce=sum_tbce / (i + 1),
+                             tdice=sum_tdice / (i + 1),
+                             tctr=sum_tctr / (i + 1))
 
         train_secs = time.time() - t_start
-        avg_bce_v = sum_bce_v / n_iters
-        avg_nce = sum_nce / n_iters
+        avg_clas2 = sum_clas2 / n_iters
+        avg_clasm = sum_clasm / n_iters
         avg_cts = sum_cts / n_iters
-        avg_fbce = sum_fbce / n_iters
-        avg_dice = sum_dice / n_iters
-        avg_ctr = sum_ctr / n_iters
-        avg_bnd = sum_bnd / n_iters
+        avg_tbce = sum_tbce / n_iters
+        avg_tdice = sum_tdice / n_iters
+        avg_tctr = sum_tctr / n_iters
+        total = (avg_clas2 + args.lambda_nce * avg_clasm + avg_cts
+                 + lam_bce * avg_tbce + lam_dice * avg_tdice + lam_ctr * avg_tctr)
+        lr_bb = optimizer.param_groups[0]['lr']
+        lr_tcn = optimizer.param_groups[1]['lr']
 
-        # End-of-epoch eval — model selection on abnormal-only mAP
-        AUC, avg_mAP_abn, dmap_abn, dmap_bsn, bsn_stats = test(
+        AUC_wsv, avg_mAP_abn, dmap_abn, AUC_tcn, diag = test(
             model, testloader, args.visual_length, prompt_text,
             gt, gtsegments, gtlabels, device, quiet=True,
-            inference=args.inference,
-            bsn_start_thresh=args.bsn_start_thresh,
-            bsn_end_thresh=args.bsn_end_thresh,
-            bsn_max_dur=args.bsn_max_dur)
+            return_diag=True, eval_head=args.eval_head)
         abn_str = '/'.join(f'{v:.2f}' for v in dmap_abn[:5])
         is_best = avg_mAP_abn > ap_best
         tag = ' *' if is_best else ''
-        bsn_str = ''
-        if bsn_stats and dmap_bsn is not None:
-            st = bsn_stats
-            avg_prop = st['total_nms_proposals'] / max(1, st['n_with_proposals'])
-            avg_bsn = float(np.mean(dmap_bsn))
-            bsn_str = (f' | BSN={avg_bsn:.2f} '
-                       f'[A:{st["n_anomaly_with_prop"]}v/{st["n_anomaly_proposals"]}p '
-                       f'N:{st["n_normal_with_prop"]}v/{st["n_normal_proposals"]}p]')
-        print(f'[ep {e+1:2d}/{args.max_epoch} {train_secs:.0f}s] '
-              f'lam=({lam1},{lam2}) | '
-              f'bce_v={avg_bce_v:.3f} nce={avg_nce:.3f} cts={avg_cts:.4f} '
-              f'fbce={avg_fbce:.3f} dice={avg_dice:.3f} ctr={avg_ctr:.3f} '
-              f'bnd={avg_bnd:.3f} | '
-              f'AUC={AUC:.4f} mAP_abn={avg_mAP_abn:.2f} [{abn_str}]{bsn_str}{tag}',
-              flush=True)
+
+        print(f'[ep {e + 1:2d}/{args.max_epoch} P{phase} {train_secs:.0f}s] '
+              f'lam=(1,{args.lambda_nce},{args.lambda_cts},{lam_bce},{lam_dice},{lam_ctr}) '
+              f'lr_bb={lr_bb:.1e} lr_tcn={lr_tcn:.1e}', flush=True)
+        print(f'  loss: CLAS2={avg_clas2:.3f} CLASM={avg_clasm:.3f} '
+              f'cts={avg_cts:.4f} tcn_bce={avg_tbce:.3f} '
+              f'tcn_dice={avg_tdice:.3f} tcn_ctr={avg_tctr:.3f} '
+              f'total={total:.3f}', flush=True)
+        print(f'[ep {e + 1:2d} eval] mAP_abn={avg_mAP_abn:.2f} '
+              f'AUC_tcn={AUC_tcn:.4f} AUC_wsv={AUC_wsv:.4f} '
+              f'bsh_med={diag["bsh_med"]:.4f} '
+              f'peak_in_gt={diag["peak_in_gt"]:.3f} '
+              f'over_cov_med={diag["over_cov_med"]:.2f}x '
+              f'[{abn_str}]{tag}', flush=True)
+
+        if e == args.phase1_epochs and prev_total is not None:
+            print(f'[ep {e + 1} P1->P2 loss trace] Δ_total={total - prev_total:+.3f} '
+                  f'(expected from tcn_bce activation)', flush=True)
+        if e == args.phase2_epochs and prev_total is not None:
+            print(f'[ep {e + 1} P2->P3 loss trace] Δ_total={total - prev_total:+.3f} '
+                  f'(expected from tcn_dice + tcn_ctr activation)', flush=True)
+
+        frac_high = diag.get('frac_tcn_high', 1.0)
+        if frac_high < 0.02:
+            print(f'[watchdog] WARN frac(tcn_prob>0.5)={frac_high:.4f} <2% — possible collapse',
+                  flush=True)
+        if e >= 5 and AUC_tcn < 0.80:
+            print(f'[watchdog] WARN AUC_tcn={AUC_tcn:.4f} <0.80 at ep {e + 1}',
+                  flush=True)
+
         if is_best:
             ap_best = avg_mAP_abn
             torch.save({'epoch': e,
@@ -334,12 +280,12 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                         'ap': ap_best}, args.checkpoint_path)
 
         scheduler.step()
-        torch.save(model.state_dict(), 'final_model/model_cur.pth')
+        prev_total = total
 
-    best_ck = torch.load(args.checkpoint_path, weights_only=False,
-                         map_location=device)
+    torch.save(model.state_dict(), 'final_model/model_final.pth')
+    best_ck = torch.load(args.checkpoint_path, weights_only=False, map_location=device)
     torch.save(best_ck['model_state_dict'], args.model_path)
-    print(f'Final best avg_mAP_agnostic = {ap_best:.2f}')
+    print(f'Final best avg_mAP_abn = {ap_best:.2f}', flush=True)
 
 
 def setup_seed(seed):
@@ -353,7 +299,6 @@ if __name__ == '__main__':
     device = "cuda" if torch.cuda.is_available() else "cpu"
     args = option.parser.parse_args()
     setup_seed(args.seed)
-
     label_map = LABEL_MAP
 
     normal_dataset = UCFDataset(
@@ -366,12 +311,17 @@ if __name__ == '__main__':
         json_path=args.train_json)
     anomaly_loader = DataLoader(anomaly_dataset, batch_size=args.batch_size,
                                 shuffle=True, drop_last=True)
-
     test_dataset = UCFDataset(args.visual_length, args.test_list, True, label_map)
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
     model = CLIPVAD(args.classes_num, args.embed_dim, args.visual_length,
                     args.visual_width, args.visual_head, args.visual_layers,
                     args.attn_window, args.prompt_prefix, args.prompt_postfix, device)
+
+    if args.load_baseline and os.path.exists(args.load_baseline):
+        base = torch.load(args.load_baseline, weights_only=False, map_location=device)
+        missing, unexpected = model.load_state_dict(base, strict=False)
+        print(f'[load_baseline] missing={len(missing)} unexpected={len(unexpected)}',
+              flush=True)
 
     train(model, normal_loader, anomaly_loader, test_loader, args, label_map, device)

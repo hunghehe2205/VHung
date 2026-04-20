@@ -191,11 +191,13 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             probs = None
             if lam_dice > 0 or lam_ctr > 0:
                 probs = torch.sigmoid(tcn_2d)
-            if lam_dice > 0:
+            eff_lam_dice = lam_dice * args.lambda_tcn_dice
+            eff_lam_ctr = lam_ctr * args.lambda_tcn_ctr
+            if eff_lam_dice > 0:
                 loss_tdice = tcn_dice(probs, y_bin, mask_T)
             else:
                 loss_tdice = torch.zeros(1, device=device)
-            if lam_ctr > 0:
+            if eff_lam_ctr > 0:
                 loss_tctr = tcn_ctr(probs, y_bin, mask_T, margin=args.contrast_margin)
             else:
                 loss_tctr = torch.zeros(1, device=device)
@@ -204,8 +206,8 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                     + args.lambda_nce * loss_clasm
                     + loss_cts
                     + lam_bce * loss_tbce
-                    + lam_dice * loss_tdice
-                    + lam_ctr * loss_tctr)
+                    + eff_lam_dice * loss_tdice
+                    + eff_lam_ctr * loss_tctr)
 
             optimizer.zero_grad()
             loss.backward()
@@ -231,7 +233,9 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         avg_tdice = sum_tdice / n_iters
         avg_tctr = sum_tctr / n_iters
         total = (avg_clas2 + args.lambda_nce * avg_clasm + avg_cts
-                 + lam_bce * avg_tbce + lam_dice * avg_tdice + lam_ctr * avg_tctr)
+                 + lam_bce * avg_tbce
+                 + (lam_dice * args.lambda_tcn_dice) * avg_tdice
+                 + (lam_ctr * args.lambda_tcn_ctr) * avg_tctr)
         lr_bb = optimizer.param_groups[0]['lr']
         lr_tcn = optimizer.param_groups[1]['lr']
 
@@ -316,7 +320,8 @@ if __name__ == '__main__':
 
     model = CLIPVAD(args.classes_num, args.embed_dim, args.visual_length,
                     args.visual_width, args.visual_head, args.visual_layers,
-                    args.attn_window, args.prompt_prefix, args.prompt_postfix, device)
+                    args.attn_window, args.prompt_prefix, args.prompt_postfix, device,
+                    tcn_dilations=tuple(args.tcn_dilations))
 
     if args.load_baseline and os.path.exists(args.load_baseline):
         base = torch.load(args.load_baseline, weights_only=False, map_location=device)

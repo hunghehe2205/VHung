@@ -58,7 +58,8 @@ class Transformer(nn.Module):
 class CLIPVAD(nn.Module):
     def __init__(self, num_class, embed_dim, visual_length, visual_width,
                  visual_head, visual_layers, attn_window, prompt_prefix,
-                 prompt_postfix, device):
+                 prompt_postfix, device, tcn_dilations=(1, 2, 4),
+                 tcn_hidden=128, tcn_dropout=0.3):
         super().__init__()
 
         self.num_class = num_class
@@ -99,19 +100,18 @@ class CLIPVAD(nn.Module):
         self.classifier = nn.Linear(visual_width, 1)
 
         # TCN head (hướng A1): branches from x_pre (post-Transformer, pre-GCN).
-        # Dilations 1,2,4 on a 512→128 stem give a receptive field of 15 snippets.
-        self.tcn = nn.Sequential(
-            nn.Conv1d(visual_width, 128, kernel_size=3, dilation=1, padding=1),
-            nn.GELU(),
-            nn.Dropout(0.3),
-            nn.Conv1d(128, 128, kernel_size=3, dilation=2, padding=2),
-            nn.GELU(),
-            nn.Dropout(0.3),
-            nn.Conv1d(128, 128, kernel_size=3, dilation=4, padding=4),
-            nn.GELU(),
-            nn.Dropout(0.3),
-            nn.Conv1d(128, 1, kernel_size=1),
-        )
+        # dilations configurable; padding auto-computed to preserve T.
+        tcn_layers = []
+        in_ch = visual_width
+        for d in tcn_dilations:
+            tcn_layers += [
+                nn.Conv1d(in_ch, tcn_hidden, kernel_size=3, dilation=d, padding=d),
+                nn.GELU(),
+                nn.Dropout(tcn_dropout),
+            ]
+            in_ch = tcn_hidden
+        tcn_layers.append(nn.Conv1d(tcn_hidden, 1, kernel_size=1))
+        self.tcn = nn.Sequential(*tcn_layers)
 
         self.clipmodel, _ = clip.load("ViT-B/16", device)
         for clip_param in self.clipmodel.parameters():

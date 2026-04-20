@@ -2,9 +2,11 @@
 # Tested on macOS (CPU) with conda env `vadclip`.
 # For CUDA: match torch/torchvision to your CUDA version (see pytorch.org).
 
-# Core ML
+# Core ML (torch 2.4.1 ↔ torchvision 0.19.1 is the official pair;
+# your local env ended up with 0.20.0 via a forced install, but pip resolver
+# rejects that combo — torchvision 0.20.0 requires torch==2.5.0.)
 torch==2.4.1
-torchvision==0.20.0
+torchvision==0.19.1
 numpy>=1.24,<2.0
 scipy==1.10.1
 scikit-learn==1.3.2
@@ -14,7 +16,7 @@ pandas==2.0.3
 ftfy==6.2.3
 regex==2024.11.6
 Pillow>=9.0
-setuptools  # for pkg_resources (used by src/clip/clip.py)
+setuptools<81  # pin: setuptools 81+ removed pkg_resources (used by src/clip/clip.py)
 
 # Utilities
 tqdm==4.67.1

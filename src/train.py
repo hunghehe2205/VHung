@@ -121,14 +121,16 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
     pos_weight_tcn = torch.tensor([args.tcn_pos_weight],
                                   dtype=torch.float32, device=device)
 
-    ap_best = 0.0
+    ap_best_all = 0.0
+    ap_best_abn = 0.0
     start_epoch = 0
     if args.use_checkpoint:
         ckpt = torch.load(args.checkpoint_path, weights_only=False, map_location=device)
         model.load_state_dict(ckpt['model_state_dict'])
         optimizer.load_state_dict(ckpt['optimizer_state_dict'])
         start_epoch = ckpt['epoch']
-        ap_best = ckpt['ap']
+        ap_best_all = ckpt.get('ap_all', ckpt.get('ap', 0.0))
+        ap_best_abn = ckpt.get('ap_abn', ckpt.get('ap', 0.0))
 
     os.makedirs('final_model', exist_ok=True)
 
@@ -244,7 +246,11 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             gt, gtsegments, gtlabels, device, quiet=True,
             return_diag=True, eval_head=args.eval_head)
         abn_str = '/'.join(f'{v:.2f}' for v in dmap_abn[:5])
-        is_best = avg_mAP_abn > ap_best
+        curr_all = diag['mAP_all']
+        curr_abn = avg_mAP_abn
+        # Best by mAP_all, tie-break by mAP_abn.
+        is_best = (curr_all > ap_best_all
+                   or (curr_all == ap_best_all and curr_abn > ap_best_abn))
         tag = ' *' if is_best else ''
 
         print(f'[ep {e + 1:2d}/{args.max_epoch} P{phase} {train_secs:.0f}s] '
@@ -255,6 +261,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
               f'tcn_dice={avg_tdice:.3f} tcn_ctr={avg_tctr:.3f} '
               f'total={total:.3f}', flush=True)
         print(f'[ep {e + 1:2d} eval] mAP_abn={avg_mAP_abn:.2f} '
+              f'mAP_all={diag["mAP_all"]:.2f} '
               f'AUC_tcn={AUC_tcn:.4f} AUC_wsv={AUC_wsv:.4f} '
               f'bsh_med={diag["bsh_med"]:.4f} '
               f'peak_in_gt={diag["peak_in_gt"]:.3f} '
@@ -277,11 +284,13 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                   flush=True)
 
         if is_best:
-            ap_best = avg_mAP_abn
+            ap_best_all = curr_all
+            ap_best_abn = curr_abn
             torch.save({'epoch': e,
                         'model_state_dict': model.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
-                        'ap': ap_best}, args.checkpoint_path)
+                        'ap_all': ap_best_all,
+                        'ap_abn': ap_best_abn}, args.checkpoint_path)
 
         scheduler.step()
         prev_total = total
@@ -289,7 +298,8 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
     torch.save(model.state_dict(), 'final_model/model_final.pth')
     best_ck = torch.load(args.checkpoint_path, weights_only=False, map_location=device)
     torch.save(best_ck['model_state_dict'], args.model_path)
-    print(f'Final best avg_mAP_abn = {ap_best:.2f}', flush=True)
+    print(f'Final best mAP_all = {ap_best_all:.2f} | mAP_abn = {ap_best_abn:.2f}',
+          flush=True)
 
 
 def setup_seed(seed):

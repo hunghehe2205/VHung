@@ -187,19 +187,20 @@ def test(model, testdataloader, maxlen, prompt_text, gt, gtsegments, gtlabels,
     agnostic_stack = [_upsample(v) for v in primary]
     dmap_abn, _ = getDetectionMAP_abnormal_only(agnostic_stack, gtsegments, gtlabels)
     avg_abn = float(np.mean(dmap_abn))
+    dmap_all, _ = getDetectionMAP_agnostic(agnostic_stack, gtsegments, gtlabels)
+    avg_all = float(np.mean(dmap_all))
 
     diag = _compute_diag(primary, gt, gtsegments, gtlabels)
+    diag['mAP_all'] = avg_all
+    diag['dmap_all'] = dmap_all
 
     if not quiet:
         print(f'[TCN  ] AUC={AUC_tcn:.4f} AP={AP_tcn:.4f}')
         print(f'[WSVAD] logits1 AUC={AUC_wsv:.4f} AP={AP_wsv:.4f}')
         abn_str = '/'.join(f'{v:.2f}' for v in dmap_abn[:5])
         print(f'[abn @rel=0.60] AVG={avg_abn:.2f} [{abn_str}]')
-
-        dmap_thr, _ = getDetectionMAP_agnostic(agnostic_stack, gtsegments, gtlabels)
-        avg_thr = float(np.mean(dmap_thr))
-        thr_str = '/'.join(f'{v:.2f}' for v in dmap_thr[:5])
-        print(f'[all @rel=0.60] AVG={avg_thr:.2f} [{thr_str}]')
+        all_str = '/'.join(f'{v:.2f}' for v in dmap_all[:5])
+        print(f'[all @rel=0.60] AVG={avg_all:.2f} [{all_str}]')
 
         fm = _frame_metrics(primary_frame, gt, thr=0.5)
         print(f'[frame @thr=0.50] TP={fm["TP"]} FP={fm["FP"]} FN={fm["FN"]} TN={fm["TN"]}'

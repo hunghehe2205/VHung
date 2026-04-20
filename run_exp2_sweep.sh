@@ -34,10 +34,22 @@ set -euo pipefail
 
 mkdir -p logs final_model
 
+# Pick where to throw stderr (tqdm). Interactive → terminal tty (live bar).
+# Under nohup/headless → /dev/null (tqdm auto-disables anyway via
+# `disable=not sys.stderr.isatty()`; we just need a writable sink).
+if [ -t 2 ] && [ -w /dev/tty ]; then
+    STDERR_SINK=/dev/tty
+else
+    STDERR_SINK=/dev/null
+fi
+echo "[sweep] stderr sink: $STDERR_SINK"
+
 # ---------- Group I: loss ablation (Exp18 curriculum + later LR drop) ----------
+# Scaled to 15 epochs total (milestones 9/13 ≈ 0.75× of original 12/18).
 GROUP1_COMMON=(
+  --max-epoch 15
   --phase1-epochs 3 --phase2-epochs 6
-  --scheduler-milestones 12 18
+  --scheduler-milestones 9 13
 )
 
 run_2a() {
@@ -48,7 +60,7 @@ run_2a() {
         --lambda-tcn-dice 0 --lambda-tcn-ctr 0 \
         --checkpoint-path final_model/ckpt_exp2a_tcn.pth \
         --model-path final_model/model_exp2a_tcn.pth \
-        2>/dev/tty | tee logs/exp2a_tcn_train.log
+        2>"$STDERR_SINK" | tee logs/exp2a_tcn_train.log
 }
 
 run_2b() {
@@ -59,7 +71,7 @@ run_2b() {
         --lambda-tcn-dice 0 \
         --checkpoint-path final_model/ckpt_exp2b_tcn.pth \
         --model-path final_model/model_exp2b_tcn.pth \
-        2>/dev/tty | tee logs/exp2b_tcn_train.log
+        2>"$STDERR_SINK" | tee logs/exp2b_tcn_train.log
 }
 
 run_2c() {
@@ -70,47 +82,50 @@ run_2c() {
         --lambda-tcn-ctr 0 \
         --checkpoint-path final_model/ckpt_exp2c_tcn.pth \
         --model-path final_model/model_exp2c_tcn.pth \
-        2>/dev/tty | tee logs/exp2c_tcn_train.log
+        2>"$STDERR_SINK" | tee logs/exp2c_tcn_train.log
 }
 
 # ---------- Group II: schedule / architecture sweep (all 3 TCN losses) ----------
 
 run_2d() {
     echo "===================================================================="
-    echo "Exp 2D [GroupII]: no-curriculum + ms 12/18 + lr_tcn 2e-4"
+    echo "Exp 2D [GroupII]: no-curriculum + ms 9/13 + lr_tcn 2e-4 (15 ep)"
     echo "===================================================================="
     python src/train.py \
+        --max-epoch 15 \
         --phase1-epochs 0 --phase2-epochs 0 \
-        --scheduler-milestones 12 18 \
+        --scheduler-milestones 9 13 \
         --lr-tcn 2e-4 \
         --checkpoint-path final_model/ckpt_exp2d_tcn.pth \
         --model-path final_model/model_exp2d_tcn.pth \
-        2>/dev/tty | tee logs/exp2d_tcn_train.log
+        2>"$STDERR_SINK" | tee logs/exp2d_tcn_train.log
 }
 
 run_2e() {
     echo "===================================================================="
-    echo "Exp 2E [GroupII]: light-curriculum 2/4 + ms 10/16"
+    echo "Exp 2E [GroupII]: light-curriculum 2/4 + ms 8/12 (15 ep)"
     echo "===================================================================="
     python src/train.py \
+        --max-epoch 15 \
         --phase1-epochs 2 --phase2-epochs 4 \
-        --scheduler-milestones 10 16 \
+        --scheduler-milestones 8 12 \
         --checkpoint-path final_model/ckpt_exp2e_tcn.pth \
         --model-path final_model/model_exp2e_tcn.pth \
-        2>/dev/tty | tee logs/exp2e_tcn_train.log
+        2>"$STDERR_SINK" | tee logs/exp2e_tcn_train.log
 }
 
 run_2f() {
     echo "===================================================================="
-    echo "Exp 2F [GroupII]: 2E + dilations [1,1,2]  (sharpen bsh, RF=7)"
+    echo "Exp 2F [GroupII]: 2E + dilations [1,1,2]  (sharpen bsh, RF=7, 15 ep)"
     echo "===================================================================="
     python src/train.py \
+        --max-epoch 15 \
         --phase1-epochs 2 --phase2-epochs 4 \
-        --scheduler-milestones 10 16 \
+        --scheduler-milestones 8 12 \
         --tcn-dilations 1 1 2 \
         --checkpoint-path final_model/ckpt_exp2f_tcn.pth \
         --model-path final_model/model_exp2f_tcn.pth \
-        2>/dev/tty | tee logs/exp2f_tcn_train.log
+        2>"$STDERR_SINK" | tee logs/exp2f_tcn_train.log
 }
 
 # ---------- dispatcher ----------
@@ -147,21 +162,27 @@ for t in "${targets[@]}"; do
 done
 
 echo "===================================================================="
-echo "Sweep done. Summary (best mAP_abn + bsh_med at that epoch):"
+echo "Sweep done. Summary (best checkpoint = max mAP_all, tiebreak mAP_abn):"
 echo "===================================================================="
-printf "  ref Exp 1 (bce+dice+ctr, no-curr, ms 6/11) : 20.69 / bsh 0.0011\n"
+printf "  ref Exp 1 (bce+dice+ctr, no-curr, ms 6/11) : mAP_abn=20.69 / bsh=0.0011\n"
 for t in "${targets[@]}"; do
     log="logs/exp${t}_tcn_train.log"
     if [[ -f "$log" ]]; then
-        final=$(grep -oE 'Final best avg_mAP_abn = [0-9.]+' "$log" | tail -1)
-        best_val=$(echo "$final" | grep -oE '[0-9]+\.[0-9]+')
-        if [[ -n "$best_val" ]]; then
-            bsh=$(grep "mAP_abn=${best_val} " "$log" | tail -1 \
+        final=$(grep -oE 'Final best mAP_all = [0-9.]+ \| mAP_abn = [0-9.]+' "$log" | tail -1)
+        # new schema; fall back to old string for logs from pre-change runs
+        if [[ -z "$final" ]]; then
+            final=$(grep -oE 'Final best avg_mAP_abn = [0-9.]+' "$log" | tail -1)
+        fi
+        best_abn=$(echo "$final" | grep -oE 'mAP_abn = [0-9.]+' | tail -1 \
+                   | awk '{print $NF}')
+        [[ -z "$best_abn" ]] && best_abn=$(echo "$final" | grep -oE '[0-9]+\.[0-9]+' | tail -1)
+        if [[ -n "$best_abn" ]]; then
+            bsh=$(grep -E "mAP_abn=${best_abn}[^0-9]" "$log" | tail -1 \
                   | grep -oE 'bsh_med=[0-9.]+' | head -1)
         else
             bsh=""
         fi
-        echo "  Exp ${t} : ${final:-<unfinished>}  ${bsh:-}"
+        echo "  Exp ${t} : ${final:-<unfinished>}   ${bsh:-}"
     else
         echo "  Exp ${t} : <log missing>"
     fi

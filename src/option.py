@@ -65,6 +65,10 @@ parser.add_argument('--tcn-input', default='xpre',
                     help="TCN input path. 'xpre' = x_pre only (baseline); "
                          "'concat_detach' = cat(x_pre, visual_features.detach()) [F1]; "
                          "'concat_joint' = cat(x_pre, visual_features) [F2, joint grad].")
+parser.add_argument('--use-a-branch', type=int, default=1,
+                    help='1=compute A-branch (text path → text_features_ori + logits2), '
+                         '0=skip entirely (returns None for those outputs). Saves forward '
+                         'compute when λ_nce and λ_cts are both 0.')
 parser.add_argument('--lambda-tcn-dice', default=1.0, type=float,
                     help='Multiplier on tcn_dice during P3 (0 = ablate).')
 parser.add_argument('--lambda-tcn-ctr', default=1.0, type=float,

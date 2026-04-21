@@ -59,7 +59,8 @@ class CLIPVAD(nn.Module):
     def __init__(self, num_class, embed_dim, visual_length, visual_width,
                  visual_head, visual_layers, attn_window, prompt_prefix,
                  prompt_postfix, device, tcn_dilations=(1, 2, 4),
-                 tcn_hidden=128, tcn_dropout=0.3, tcn_input='xpre'):
+                 tcn_hidden=128, tcn_dropout=0.3, tcn_input='xpre',
+                 use_a_branch=True):
         super().__init__()
 
         self.num_class = num_class
@@ -103,6 +104,7 @@ class CLIPVAD(nn.Module):
         # tcn_input='concat_*' appends visual_features (post-GCN) → in_ch ×2.
         # dilations configurable; padding auto-computed to preserve T.
         self.tcn_input = tcn_input
+        self.use_a_branch = bool(use_a_branch)
         tcn_layers = []
         in_ch = visual_width * 2 if tcn_input != 'xpre' else visual_width
         for d in tcn_dilations:
@@ -208,6 +210,9 @@ class CLIPVAD(nn.Module):
         else:
             tcn_in = x_pre
         tcn_logits = self.tcn(tcn_in.transpose(1, 2)).transpose(1, 2)
+
+        if not self.use_a_branch:
+            return None, logits1, None, tcn_logits
 
         text_features_ori = self.encode_textprompt(text)
 

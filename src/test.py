@@ -243,7 +243,8 @@ if __name__ == '__main__':
                     args.visual_width, args.visual_head, args.visual_layers,
                     args.attn_window, args.prompt_prefix, args.prompt_postfix, device,
                     tcn_dilations=tuple(args.tcn_dilations),
-                    tcn_input=args.tcn_input)
+                    tcn_input=args.tcn_input,
+                    use_a_branch=bool(args.use_a_branch))
     model.load_state_dict(torch.load(args.model_path, weights_only=False,
                                      map_location=device), strict=False)
 

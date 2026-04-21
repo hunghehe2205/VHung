@@ -172,14 +172,18 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
                 visual, None, prompt_text, lengths)
 
             loss_clas2 = CLAS2(logits1, text_labels_t, lengths, device, y_bin=y_bin)
-            loss_clasm = CLASM(logits2, text_labels_t, lengths, device)
+            if logits2 is not None:
+                loss_clasm = CLASM(logits2, text_labels_t, lengths, device)
+            else:
+                loss_clasm = torch.zeros(1, device=device)
 
             loss_cts = torch.zeros(1, device=device)
-            tf_n = text_features[0] / text_features[0].norm(dim=-1, keepdim=True)
-            for j in range(1, text_features.shape[0]):
-                tf_a = text_features[j] / text_features[j].norm(dim=-1, keepdim=True)
-                loss_cts = loss_cts + torch.abs(tf_n @ tf_a)
-            loss_cts = loss_cts / 13 * args.lambda_cts
+            if text_features is not None:
+                tf_n = text_features[0] / text_features[0].norm(dim=-1, keepdim=True)
+                for j in range(1, text_features.shape[0]):
+                    tf_a = text_features[j] / text_features[j].norm(dim=-1, keepdim=True)
+                    loss_cts = loss_cts + torch.abs(tf_n @ tf_a)
+                loss_cts = loss_cts / 13 * args.lambda_cts
 
             tcn_2d = tcn_logits.squeeze(-1)
             mask_T = (torch.arange(tcn_2d.shape[1], device=device)
@@ -332,7 +336,8 @@ if __name__ == '__main__':
                     args.visual_width, args.visual_head, args.visual_layers,
                     args.attn_window, args.prompt_prefix, args.prompt_postfix, device,
                     tcn_dilations=tuple(args.tcn_dilations),
-                    tcn_input=args.tcn_input)
+                    tcn_input=args.tcn_input,
+                    use_a_branch=bool(args.use_a_branch))
 
     if args.load_baseline and os.path.exists(args.load_baseline):
         base = torch.load(args.load_baseline, weights_only=False, map_location=device)

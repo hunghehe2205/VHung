@@ -59,7 +59,7 @@ class CLIPVAD(nn.Module):
     def __init__(self, num_class, embed_dim, visual_length, visual_width,
                  visual_head, visual_layers, attn_window, prompt_prefix,
                  prompt_postfix, device, tcn_dilations=(1, 2, 4),
-                 tcn_hidden=128, tcn_dropout=0.3):
+                 tcn_hidden=128, tcn_dropout=0.3, tcn_input='xpre'):
         super().__init__()
 
         self.num_class = num_class
@@ -100,9 +100,11 @@ class CLIPVAD(nn.Module):
         self.classifier = nn.Linear(visual_width, 1)
 
         # TCN head (hướng A1): branches from x_pre (post-Transformer, pre-GCN).
+        # tcn_input='concat_*' appends visual_features (post-GCN) → in_ch ×2.
         # dilations configurable; padding auto-computed to preserve T.
+        self.tcn_input = tcn_input
         tcn_layers = []
-        in_ch = visual_width
+        in_ch = visual_width * 2 if tcn_input != 'xpre' else visual_width
         for d in tcn_dilations:
             tcn_layers += [
                 nn.Conv1d(in_ch, tcn_hidden, kernel_size=3, dilation=d, padding=d),
@@ -198,8 +200,14 @@ class CLIPVAD(nn.Module):
         visual_features, x_pre = self.encode_video(visual, padding_mask, lengths)
         logits1 = self.classifier(visual_features + self.mlp2(visual_features))
 
-        # TCN head: x_pre [B, T, D] -> conv over time -> [B, T, 1]
-        tcn_logits = self.tcn(x_pre.transpose(1, 2)).transpose(1, 2)
+        # TCN head: x_pre [B, T, D] (+ visual_features) -> conv -> [B, T, 1]
+        if self.tcn_input == 'concat_detach':
+            tcn_in = torch.cat([x_pre, visual_features.detach()], dim=-1)
+        elif self.tcn_input == 'concat_joint':
+            tcn_in = torch.cat([x_pre, visual_features], dim=-1)
+        else:
+            tcn_in = x_pre
+        tcn_logits = self.tcn(tcn_in.transpose(1, 2)).transpose(1, 2)
 
         text_features_ori = self.encode_textprompt(text)
 

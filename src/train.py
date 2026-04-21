@@ -331,7 +331,8 @@ if __name__ == '__main__':
     model = CLIPVAD(args.classes_num, args.embed_dim, args.visual_length,
                     args.visual_width, args.visual_head, args.visual_layers,
                     args.attn_window, args.prompt_prefix, args.prompt_postfix, device,
-                    tcn_dilations=tuple(args.tcn_dilations))
+                    tcn_dilations=tuple(args.tcn_dilations),
+                    tcn_input=args.tcn_input)
 
     if args.load_baseline and os.path.exists(args.load_baseline):
         base = torch.load(args.load_baseline, weights_only=False, map_location=device)

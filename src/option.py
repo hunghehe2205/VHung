@@ -60,6 +60,11 @@ parser.add_argument('--gauss-sigma', default=2.0, type=float,
                     help='Gaussian smoothing σ for TCN target (snippet units)')
 parser.add_argument('--tcn-dilations', default=[1, 2, 4], nargs='+', type=int,
                     help='Dilations per 3x3 TCN conv block (RF scales with sum).')
+parser.add_argument('--tcn-input', default='xpre',
+                    choices=['xpre', 'concat_detach', 'concat_joint'],
+                    help="TCN input path. 'xpre' = x_pre only (baseline); "
+                         "'concat_detach' = cat(x_pre, visual_features.detach()) [F1]; "
+                         "'concat_joint' = cat(x_pre, visual_features) [F2, joint grad].")
 parser.add_argument('--lambda-tcn-dice', default=1.0, type=float,
                     help='Multiplier on tcn_dice during P3 (0 = ablate).')
 parser.add_argument('--lambda-tcn-ctr', default=1.0, type=float,

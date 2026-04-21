@@ -45,6 +45,8 @@ parser.add_argument('--phase2-epochs', default=6, type=int,
                     help='Up to this, only tcn_bce is active; after, dice+ctr join')
 
 # Loss weights
+parser.add_argument('--lambda-clas2', default=1.0, type=float,
+                    help='Weight on CLAS2 (top-k MIL). 0 = ablate backbone anchor.')
 parser.add_argument('--lambda-nce', default=1.0, type=float)
 parser.add_argument('--lambda-cts', default=0.1, type=float,
                     help='Internal weight applied to loss_cts')

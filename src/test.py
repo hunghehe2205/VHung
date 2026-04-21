@@ -41,6 +41,10 @@ def _frame_metrics(scores, gt, thr=0.5):
 
 
 def _boundary_sharpness(prob, inside_mask, k_frame=48):
+    """Per-video boundary sharpness. Max |Δprob| within a ±k_frame window
+    around any GT boundary — captures the sharpest single-step transition.
+    Using mean would dilute a real step jump by 95 smooth frames in a
+    96-frame window (dev_reframe spec: MAX, not mean)."""
     gt_diff = np.abs(np.diff(inside_mask.astype(np.float32), prepend=0))
     edges = np.where(gt_diff > 0.5)[0]
     if len(edges) == 0:
@@ -50,7 +54,7 @@ def _boundary_sharpness(prob, inside_mask, k_frame=48):
     for ed in edges:
         lo, hi = max(0, ed - k_frame), min(len(prob), ed + k_frame)
         mask[lo:hi] = True
-    return float(diff[mask].mean()) if mask.any() else 0.0
+    return float(diff[mask].max()) if mask.any() else 0.0
 
 
 def _compute_diag(primary, gt_full, gtsegments, gtlabels):

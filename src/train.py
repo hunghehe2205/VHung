@@ -204,7 +204,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
             else:
                 loss_tctr = torch.zeros(1, device=device)
 
-            loss = (loss_clas2
+            loss = (args.lambda_clas2 * loss_clas2
                     + args.lambda_nce * loss_clasm
                     + loss_cts
                     + lam_bce * loss_tbce
@@ -234,7 +234,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         avg_tbce = sum_tbce / n_iters
         avg_tdice = sum_tdice / n_iters
         avg_tctr = sum_tctr / n_iters
-        total = (avg_clas2 + args.lambda_nce * avg_clasm + avg_cts
+        total = (args.lambda_clas2 * avg_clas2 + args.lambda_nce * avg_clasm + avg_cts
                  + lam_bce * avg_tbce
                  + (lam_dice * args.lambda_tcn_dice) * avg_tdice
                  + (lam_ctr * args.lambda_tcn_ctr) * avg_tctr)
@@ -254,7 +254,7 @@ def train(model, normal_loader, anomaly_loader, testloader, args, label_map, dev
         tag = ' *' if is_best else ''
 
         print(f'[ep {e + 1:2d}/{args.max_epoch} P{phase} {train_secs:.0f}s] '
-              f'lam=(1,{args.lambda_nce},{args.lambda_cts},{lam_bce},{lam_dice},{lam_ctr}) '
+              f'lam=({args.lambda_clas2},{args.lambda_nce},{args.lambda_cts},{lam_bce},{lam_dice},{lam_ctr}) '
               f'lr_bb={lr_bb:.1e} lr_tcn={lr_tcn:.1e}', flush=True)
         print(f'  loss: CLAS2={avg_clas2:.3f} CLASM={avg_clasm:.3f} '
               f'cts={avg_cts:.4f} tcn_bce={avg_tbce:.3f} '

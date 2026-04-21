@@ -34,15 +34,29 @@ set -euo pipefail
 
 mkdir -p logs final_model
 
-# Pick where to throw stderr (tqdm). Interactive → terminal tty (live bar).
-# Under nohup/headless → /dev/null (tqdm auto-disables anyway via
-# `disable=not sys.stderr.isatty()`; we just need a writable sink).
+# stderr routing:
+#   Interactive (tty)        → write to /dev/tty (live tqdm bar, log stays clean)
+#   Headless (nohup/tmux -d) → merge stderr into stdout so errors land in the
+#                              per-run log; tqdm auto-disables under no-tty,
+#                              so the log won't fill with progress bars.
 if [ -t 2 ] && [ -w /dev/tty ]; then
-    STDERR_SINK=/dev/tty
+    SWEEP_MODE=tty
+    echo "[sweep] mode: interactive (tqdm → /dev/tty, log clean)"
 else
-    STDERR_SINK=/dev/null
+    SWEEP_MODE=headless
+    echo "[sweep] mode: headless (stderr merged into log)"
 fi
-echo "[sweep] stderr sink: $STDERR_SINK"
+
+# Redirect helper: route stderr based on SWEEP_MODE, pipe stdout through tee.
+run_train() {
+    local logfile=$1
+    shift
+    if [[ "$SWEEP_MODE" == "tty" ]]; then
+        python src/train.py "$@" 2>/dev/tty | tee "$logfile"
+    else
+        python src/train.py "$@" 2>&1 | tee "$logfile"
+    fi
+}
 
 # ---------- Group I: loss ablation (Exp18 curriculum + later LR drop) ----------
 # Scaled to 15 epochs total (milestones 9/13 ≈ 0.75× of original 12/18).
@@ -56,33 +70,30 @@ run_2a() {
     echo "===================================================================="
     echo "Exp 2A [GroupI]: tcn_bce only  (ablate dice + ctr)"
     echo "===================================================================="
-    python src/train.py "${GROUP1_COMMON[@]}" \
+    run_train logs/exp2a_tcn_train.log "${GROUP1_COMMON[@]}" \
         --lambda-tcn-dice 0 --lambda-tcn-ctr 0 \
         --checkpoint-path final_model/ckpt_exp2a_tcn.pth \
-        --model-path final_model/model_exp2a_tcn.pth \
-        2>"$STDERR_SINK" | tee logs/exp2a_tcn_train.log
+        --model-path final_model/model_exp2a_tcn.pth
 }
 
 run_2b() {
     echo "===================================================================="
     echo "Exp 2B [GroupI]: tcn_bce + tcn_ctr  (ablate dice)"
     echo "===================================================================="
-    python src/train.py "${GROUP1_COMMON[@]}" \
+    run_train logs/exp2b_tcn_train.log "${GROUP1_COMMON[@]}" \
         --lambda-tcn-dice 0 \
         --checkpoint-path final_model/ckpt_exp2b_tcn.pth \
-        --model-path final_model/model_exp2b_tcn.pth \
-        2>"$STDERR_SINK" | tee logs/exp2b_tcn_train.log
+        --model-path final_model/model_exp2b_tcn.pth
 }
 
 run_2c() {
     echo "===================================================================="
     echo "Exp 2C [GroupI]: tcn_bce + tcn_dice  (ablate ctr)"
     echo "===================================================================="
-    python src/train.py "${GROUP1_COMMON[@]}" \
+    run_train logs/exp2c_tcn_train.log "${GROUP1_COMMON[@]}" \
         --lambda-tcn-ctr 0 \
         --checkpoint-path final_model/ckpt_exp2c_tcn.pth \
-        --model-path final_model/model_exp2c_tcn.pth \
-        2>"$STDERR_SINK" | tee logs/exp2c_tcn_train.log
+        --model-path final_model/model_exp2c_tcn.pth
 }
 
 # ---------- Group II: schedule / architecture sweep (all 3 TCN losses) ----------
@@ -91,41 +102,38 @@ run_2d() {
     echo "===================================================================="
     echo "Exp 2D [GroupII]: no-curriculum + ms 9/13 + lr_tcn 2e-4 (15 ep)"
     echo "===================================================================="
-    python src/train.py \
+    run_train logs/exp2d_tcn_train.log \
         --max-epoch 15 \
         --phase1-epochs 0 --phase2-epochs 0 \
         --scheduler-milestones 9 13 \
         --lr-tcn 2e-4 \
         --checkpoint-path final_model/ckpt_exp2d_tcn.pth \
-        --model-path final_model/model_exp2d_tcn.pth \
-        2>"$STDERR_SINK" | tee logs/exp2d_tcn_train.log
+        --model-path final_model/model_exp2d_tcn.pth
 }
 
 run_2e() {
     echo "===================================================================="
     echo "Exp 2E [GroupII]: light-curriculum 2/4 + ms 8/12 (15 ep)"
     echo "===================================================================="
-    python src/train.py \
+    run_train logs/exp2e_tcn_train.log \
         --max-epoch 15 \
         --phase1-epochs 2 --phase2-epochs 4 \
         --scheduler-milestones 8 12 \
         --checkpoint-path final_model/ckpt_exp2e_tcn.pth \
-        --model-path final_model/model_exp2e_tcn.pth \
-        2>"$STDERR_SINK" | tee logs/exp2e_tcn_train.log
+        --model-path final_model/model_exp2e_tcn.pth
 }
 
 run_2f() {
     echo "===================================================================="
     echo "Exp 2F [GroupII]: 2E + dilations [1,1,2]  (sharpen bsh, RF=7, 15 ep)"
     echo "===================================================================="
-    python src/train.py \
+    run_train logs/exp2f_tcn_train.log \
         --max-epoch 15 \
         --phase1-epochs 2 --phase2-epochs 4 \
         --scheduler-milestones 8 12 \
         --tcn-dilations 1 1 2 \
         --checkpoint-path final_model/ckpt_exp2f_tcn.pth \
-        --model-path final_model/model_exp2f_tcn.pth \
-        2>"$STDERR_SINK" | tee logs/exp2f_tcn_train.log
+        --model-path final_model/model_exp2f_tcn.pth
 }
 
 # ---------- dispatcher ----------

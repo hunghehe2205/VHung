@@ -154,7 +154,8 @@ def sweep_one(ckpt_path, name, args, alphas, device):
                     args.attn_window, args.prompt_prefix, args.prompt_postfix,
                     device, tcn_dilations=tuple(args.tcn_dilations),
                     tcn_input=args.tcn_input,
-                    use_a_branch=bool(args.use_a_branch))
+                    use_a_branch=bool(args.use_a_branch),
+                    tcn_multiscale=bool(args.tcn_multiscale))
     print(f'\nLoading {ckpt_path}')
     model.load_state_dict(torch.load(ckpt_path, weights_only=False,
                                       map_location=device), strict=False)

@@ -337,7 +337,8 @@ if __name__ == '__main__':
                     args.attn_window, args.prompt_prefix, args.prompt_postfix, device,
                     tcn_dilations=tuple(args.tcn_dilations),
                     tcn_input=args.tcn_input,
-                    use_a_branch=bool(args.use_a_branch))
+                    use_a_branch=bool(args.use_a_branch),
+                    tcn_multiscale=bool(args.tcn_multiscale))
 
     if args.load_baseline and os.path.exists(args.load_baseline):
         base = torch.load(args.load_baseline, weights_only=False, map_location=device)

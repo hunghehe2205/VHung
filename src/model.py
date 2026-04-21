@@ -60,7 +60,7 @@ class CLIPVAD(nn.Module):
                  visual_head, visual_layers, attn_window, prompt_prefix,
                  prompt_postfix, device, tcn_dilations=(1, 2, 4),
                  tcn_hidden=128, tcn_dropout=0.3, tcn_input='xpre',
-                 use_a_branch=True):
+                 use_a_branch=True, tcn_multiscale=False):
         super().__init__()
 
         self.num_class = num_class
@@ -102,20 +102,44 @@ class CLIPVAD(nn.Module):
 
         # TCN head (hướng A1): branches from x_pre (post-Transformer, pre-GCN).
         # tcn_input='concat_*' appends visual_features (post-GCN) → in_ch ×2.
-        # dilations configurable; padding auto-computed to preserve T.
+        # tcn_multiscale=True: H1-D, 3 parallel branches + element-wise max + head.
         self.tcn_input = tcn_input
         self.use_a_branch = bool(use_a_branch)
-        tcn_layers = []
+        self.tcn_multiscale = bool(tcn_multiscale)
         in_ch = visual_width * 2 if tcn_input != 'xpre' else visual_width
-        for d in tcn_dilations:
-            tcn_layers += [
-                nn.Conv1d(in_ch, tcn_hidden, kernel_size=3, dilation=d, padding=d),
-                nn.GELU(),
-                nn.Dropout(tcn_dropout),
-            ]
-            in_ch = tcn_hidden
-        tcn_layers.append(nn.Conv1d(tcn_hidden, 1, kernel_size=1))
-        self.tcn = nn.Sequential(*tcn_layers)
+
+        def _build_tcn_body(in_channels, dilations):
+            layers = []
+            c = in_channels
+            for d in dilations:
+                layers += [
+                    nn.Conv1d(c, tcn_hidden, kernel_size=3, dilation=d, padding=d),
+                    nn.GELU(),
+                    nn.Dropout(tcn_dropout),
+                ]
+                c = tcn_hidden
+            return nn.Sequential(*layers)
+
+        if self.tcn_multiscale:
+            # Short / mid / long receptive fields: RF = 1 + 2·Σdilations
+            # = 1+2·(1+2+4)=15, 1+2·(2+4+8)=29, 1+2·(4+8+16)=57 snippets.
+            ms_dilations = [(1, 2, 4), (2, 4, 8), (4, 8, 16)]
+            self.tcn_branches = nn.ModuleList(
+                [_build_tcn_body(in_ch, d) for d in ms_dilations])
+            self.tcn_head = nn.Conv1d(tcn_hidden, 1, kernel_size=1)
+        else:
+            # Flat Sequential (preserves state_dict compat with pre-multiscale ckpts)
+            tcn_layers = []
+            c = in_ch
+            for d in tcn_dilations:
+                tcn_layers += [
+                    nn.Conv1d(c, tcn_hidden, kernel_size=3, dilation=d, padding=d),
+                    nn.GELU(),
+                    nn.Dropout(tcn_dropout),
+                ]
+                c = tcn_hidden
+            tcn_layers.append(nn.Conv1d(tcn_hidden, 1, kernel_size=1))
+            self.tcn = nn.Sequential(*tcn_layers)
 
         self.clipmodel, _ = clip.load("ViT-B/16", device)
         for clip_param in self.clipmodel.parameters():
@@ -209,7 +233,13 @@ class CLIPVAD(nn.Module):
             tcn_in = torch.cat([x_pre, visual_features], dim=-1)
         else:
             tcn_in = x_pre
-        tcn_logits = self.tcn(tcn_in.transpose(1, 2)).transpose(1, 2)
+        tcn_in_t = tcn_in.transpose(1, 2)  # [B, C, T]
+        if self.tcn_multiscale:
+            branch_outs = [br(tcn_in_t) for br in self.tcn_branches]
+            fused = torch.stack(branch_outs, dim=0).max(dim=0).values
+            tcn_logits = self.tcn_head(fused).transpose(1, 2)
+        else:
+            tcn_logits = self.tcn(tcn_in_t).transpose(1, 2)
 
         if not self.use_a_branch:
             return None, logits1, None, tcn_logits

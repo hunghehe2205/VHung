@@ -69,6 +69,10 @@ parser.add_argument('--use-a-branch', type=int, default=1,
                     help='1=compute A-branch (text path → text_features_ori + logits2), '
                          '0=skip entirely (returns None for those outputs). Saves forward '
                          'compute when λ_nce and λ_cts are both 0.')
+parser.add_argument('--tcn-multiscale', type=int, default=0,
+                    help='1=H1-D multi-scale TCN: 3 parallel branches with dilations '
+                         '[1,2,4]/[2,4,8]/[4,8,16], element-wise max at hidden level, '
+                         'shared Conv1d head. 0=single TCN (default, uses --tcn-dilations).')
 parser.add_argument('--lambda-tcn-dice', default=1.0, type=float,
                     help='Multiplier on tcn_dice during P3 (0 = ablate).')
 parser.add_argument('--lambda-tcn-ctr', default=1.0, type=float,
